@@ -1,3 +1,8 @@
+-- Rerunnable wing test: each run stops and restores the preceding run.
+local cleanupCurrentRun
+local runToken = {}
+_G.__RIVALS_SKIN_CHANGER_RUN_TOKEN = runToken
+local setupOK, setupError = xpcall(function()
 -- Rivals Skin Changer & Weapon Enhancement Engine
 -- Resolves weapon slots and swaps model pointers in game memory.
 -- Includes viewmodel, sound, and animation adjustments; timing and stability depend on the runtime.
@@ -17,11 +22,19 @@ while not LP do
 end
 
 if game.GameId ~= 6035872082 then return end
+if _G.__RIVALS_SKIN_CHANGER_RUN_TOKEN ~= runToken then return end
 
--- Idempotency: restore memory pointers if previously active
-if _G.__RIVALS_SKIN_CHANGER_ACTIVE and type(_G.__RIVALS_SKIN_CHANGER_RESTORE) == "function" then
-    pcall(_G.__RIVALS_SKIN_CHANGER_RESTORE)
+-- Stop the previous run before this run changes any models.
+if type(_G.__RIVALS_SKIN_CHANGER_RESTORE) == "function" then
+    local ok, restored = pcall(_G.__RIVALS_SKIN_CHANGER_RESTORE)
+    if not ok or restored == false then
+        pcall(notify, "Previous cleanup failed. Rejoin before testing again.", "SC", 6)
+        return
+    end
+    -- Let older versions' sleeping loops finish before starting this version.
+    task.wait(0.35)
 end
+if _G.__RIVALS_SKIN_CHANGER_RUN_TOKEN ~= runToken then return end
 
 local A = LP:WaitForChild("PlayerScripts", 5):WaitForChild("Assets", 5)
 local vm = A and A:WaitForChild("ViewModels", 5)
@@ -31,6 +44,7 @@ if not wf then
     pcall(notify, "Weapons folder not found.", "SC", 5)
     return
 end
+if _G.__RIVALS_SKIN_CHANGER_RUN_TOKEN ~= runToken then return end
 
 local mrd, mwr, pcall, ipairs, pairs = memory_read, memory_write, pcall, ipairs, pairs
 
@@ -39,8 +53,92 @@ local rd = function(a)
     return o and v or nil 
 end
 
-local wr = function(a, v) 
-    pcall(mwr, "uintptr_t", a, v) 
+local _scriptAlive = true
+local soundConnections = {}
+local uisConn = nil
+local managedTasks = {}
+local animationObjects = {}
+local animationTracks = {}
+local undoActions = {}
+local savedMemory = {}
+local savedProperties = {}
+local cleanupFinished = false
+local cleanupSucceeded = true
+
+-- Record original values before this run changes them, including rig and wing pointers.
+local wr = function(a, v)
+    if not _scriptAlive then return end
+    if not savedMemory[a] then
+        local ok, original = pcall(mrd, "uintptr_t", a)
+        if not ok or original == nil then return end
+        savedMemory[a] = true
+        table.insert(undoActions, {address = a, value = original})
+    end
+    pcall(mwr, "uintptr_t", a, v)
+end
+
+local function setProperty(object, property, value)
+    if not _scriptAlive then return end
+    local original = object[property]
+    if original == value then return end
+    local saved = savedProperties[object]
+    if not saved then
+        saved = {}
+        savedProperties[object] = saved
+    end
+    if not saved[property] then
+        saved[property] = true
+        table.insert(undoActions, {object = object, property = property, value = original})
+    end
+    object[property] = value
+end
+
+local function fullCleanup()
+    if cleanupFinished then return cleanupSucceeded end
+    cleanupFinished = true
+    _scriptAlive = false
+    for _, connection in ipairs(soundConnections) do
+        pcall(function() connection:Disconnect() end)
+    end
+    if uisConn then pcall(function() uisConn:Disconnect() end) end
+    if task.cancel then
+        for _, thread in ipairs(managedTasks) do
+            if thread ~= coroutine.running() then pcall(task.cancel, thread) end
+        end
+    end
+    for _, track in ipairs(animationTracks) do
+        pcall(function() track:Stop(0) end)
+        pcall(function() track:Destroy() end)
+    end
+    for _, animation in ipairs(animationObjects) do
+        pcall(function() animation:Destroy() end)
+    end
+    -- Undo in reverse order; never pass restoration writes through the recorder.
+    for i = #undoActions, 1, -1 do
+        local entry = undoActions[i]
+        if entry.address then
+            local ok, result = pcall(mwr, "uintptr_t", entry.address, entry.value)
+            if not ok or result == false then cleanupSucceeded = false end
+        else
+            -- A sound or effect may have been destroyed by the game already.
+            pcall(function() entry.object[entry.property] = entry.value end)
+        end
+    end
+    managedTasks, soundConnections, animationTracks, animationObjects = {}, {}, {}, {}
+    undoActions, savedMemory, savedProperties = {}, {}, {}
+    _G.__RIVALS_SKIN_CHANGER_ACTIVE = false
+    return cleanupSucceeded
+end
+
+-- Register cleanup before any rig changes, event connections, or background tasks.
+cleanupCurrentRun = fullCleanup
+_G.__RIVALS_SKIN_CHANGER_RESTORE = fullCleanup
+_G.__RIVALS_SKIN_CHANGER_ACTIVE = true
+
+local function spawnManaged(callback)
+    local thread = task.spawn(callback)
+    table.insert(managedTasks, thread)
+    return thread
 end
 
 local OFF = {
@@ -87,7 +185,7 @@ local function fixViewModelRoots()
         if vmr and not vmr:FindFirstChild("RightArm") then
             for _, c in ipairs(vmr:GetChildren()) do
                 if c.ClassName == "Part" and (c.Name == "" or c.Name == "_fake") then
-                    pcall(function() c.Name = "RightArm" end)
+                    pcall(function() setProperty(c, "Name", "RightArm") end)
                     break
                 end
             end
@@ -174,12 +272,6 @@ local function findSkinModel(skinTarget)
     return skinIndex[skinTarget] or skinIndex[skinTarget:lower()]
 end
 
-local memoryRestores = {}
-
-local function registerRestore(info)
-    table.insert(memoryRestores, info)
-end
-
 -- Specialized Crossbow rig: assigns Stick and Tip name pointers when source parts are available
 local function fixCrossbowRig(skinModel)
     for _, partName in ipairs({"Body", "StringCurve", "Arrow", "Wings1", "Wings2"}) do
@@ -188,10 +280,10 @@ local function fixCrossbowRig(skinModel)
             if not sub:FindFirstChild("Primary") then
                 local firstPart = sub:FindFirstChildWhichIsA("BasePart")
                 if firstPart then
-                    pcall(function() sub.PrimaryPart = firstPart end)
+                    pcall(function() setProperty(sub, "PrimaryPart", firstPart) end)
                 end
             else
-                pcall(function() sub.PrimaryPart = sub.Primary end)
+                pcall(function() setProperty(sub, "PrimaryPart", sub.Primary) end)
             end
         end
     end
@@ -220,7 +312,7 @@ local function fixCrossbowRig(skinModel)
             local spare = extra:FindFirstChildWhichIsA("MeshPart")
             if spare then
                 wr(spare.Address + OFF.NameContainer, tipNC)
-                pcall(function() spare.Parent = arrow end)
+                pcall(function() setProperty(spare, "Parent", arrow) end)
             end
         end
     end
@@ -232,7 +324,7 @@ local function fixBowRig(skinModel)
     if arrow and arrow.ClassName == "Model" then
         if not arrow:FindFirstChild("Primary") then
             local p = arrow:FindFirstChildWhichIsA("BasePart")
-            if p then pcall(function() arrow.PrimaryPart = p end) end
+            if p then pcall(function() setProperty(arrow, "PrimaryPart", p) end) end
         end
     end
 end
@@ -243,7 +335,7 @@ local function fixRPGRig(skinModel)
     if rocket and rocket.ClassName == "Model" then
         if not rocket:FindFirstChild("Primary") then
             local p = rocket:FindFirstChildWhichIsA("BasePart")
-            if p then pcall(function() rocket.PrimaryPart = p end) end
+            if p then pcall(function() setProperty(rocket, "PrimaryPart", p) end) end
         end
     end
 end
@@ -252,7 +344,7 @@ end
 local function fixGrenadeRig(skinModel)
     local bomb = skinModel:FindFirstChild("Bomb")
     if bomb and bomb.ClassName == "Model" then
-        pcall(function() bomb.Name = "Body" end)
+        pcall(function() setProperty(bomb, "Name", "Body") end)
         return
     end
 end
@@ -265,10 +357,10 @@ local function fixGunbladeRig(skinModel)
             if not sub:FindFirstChild("Primary") then
                 local firstPart = sub:FindFirstChildWhichIsA("BasePart")
                 if firstPart then
-                    pcall(function() sub.PrimaryPart = firstPart end)
+                    pcall(function() setProperty(sub, "PrimaryPart", firstPart) end)
                 end
             else
-                pcall(function() sub.PrimaryPart = sub.Primary end)
+                pcall(function() setProperty(sub, "PrimaryPart", sub.Primary) end)
             end
         end
     end
@@ -280,16 +372,16 @@ local function fixKatanaRig(skinModel)
     for _, sub in ipairs(skinModel:GetChildren()) do
         if sub.ClassName == "Model" and sub.Name ~= "_fake" then
             if sub.Name == "" or sub.Name:find("Wing") then
-                pcall(function() sub.Name = "Wings" .. tostring(wingIdx) end)
+                pcall(function() setProperty(sub, "Name", "Wings" .. tostring(wingIdx)) end)
                 wingIdx = wingIdx + 1
             end
             if not sub:FindFirstChild("Primary") then
                 local firstPart = sub:FindFirstChildWhichIsA("BasePart")
                 if firstPart then
-                    pcall(function() sub.PrimaryPart = firstPart end)
+                    pcall(function() setProperty(sub, "PrimaryPart", firstPart) end)
                 end
             else
-                pcall(function() sub.PrimaryPart = sub.Primary end)
+                pcall(function() setProperty(sub, "PrimaryPart", sub.Primary) end)
             end
         end
     end
@@ -304,37 +396,36 @@ local function rigSkinModel(m)
             if not sub:FindFirstChild("Primary") then
                 local firstPart = sub:FindFirstChildWhichIsA("BasePart")
                 if firstPart then
-                    pcall(function() sub.PrimaryPart = firstPart end)
+                    pcall(function() setProperty(sub, "PrimaryPart", firstPart) end)
                 end
             else
-                pcall(function() sub.PrimaryPart = sub.Primary end)
+                pcall(function() setProperty(sub, "PrimaryPart", sub.Primary) end)
             end
         end
     end
     
     if m:FindFirstChild("Body") and m.Body:FindFirstChild("Primary") then
-        pcall(function() m.PrimaryPart = m.Body.Primary end)
+        pcall(function() setProperty(m, "PrimaryPart", m.Body.Primary) end)
     elseif not m.PrimaryPart then
-        pcall(function() m.PrimaryPart = m:FindFirstChildWhichIsA("BasePart", true) end)
+        pcall(function() setProperty(m, "PrimaryPart", m:FindFirstChildWhichIsA("BasePart", true)) end)
     end
     
     for _, c in ipairs(m:GetChildren()) do
         local n = c.Name:lower()
         if n:find("shell") or n:find("%.r") or n:find("%.l") or n:find("sleeve") or n:find("juggle") then
             if c.ClassName == "Model" then
-                pcall(function() c.Name = "_fake" end)
+                pcall(function() setProperty(c, "Name", "_fake") end)
             end
         end
     end
 end
 
-local _scriptAlive = true
-
 -- Active viewmodel beam and particle FX culler
-task.spawn(function()
+spawnManaged(function()
     local rs = game:GetService("ReplicatedStorage")
     while _scriptAlive do
         task.wait(0.3)
+        if not _scriptAlive then break end
         pcall(function()
             local tempVM = rs:FindFirstChild("Assets") and rs.Assets:FindFirstChild("Temp") and rs.Assets.Temp:FindFirstChild("ViewModels")
             if tempVM then
@@ -345,9 +436,9 @@ task.spawn(function()
                         for _, desc in ipairs(activeVM:GetDescendants()) do
                             if desc.ClassName == "Beam" or desc.ClassName == "ParticleEmitter" or desc.ClassName == "Trail" then
                                 if isUnequipped and desc.Enabled then
-                                    desc.Enabled = false
+                                    setProperty(desc, "Enabled", false)
                                 elseif not isUnequipped and not desc.Enabled then
-                                    desc.Enabled = true
+                                    setProperty(desc, "Enabled", true)
                                 end
                             end
                         end
@@ -362,11 +453,12 @@ end)
 local ACTIVE_CONFIG_SKINS = {}
 
 -- Periodic wing retargeting (Katana Wings1/2 & Uzi Wing1/2) and equipped-weapon tracking
-task.spawn(function()
+spawnManaged(function()
     local lastEquippedWeapon = nil
     local lastNotifyTime = 0
     while _scriptAlive do
         task.wait(0.04)
+        if not _scriptAlive then break end
         pcall(function()
             local fp = workspace:FindFirstChild("ViewModels") and workspace.ViewModels:FindFirstChild("FirstPerson")
             if fp then
@@ -520,19 +612,19 @@ local SOUND_REPLACEMENTS = {
 }
 
 local function hookSound(sound)
+    if not _scriptAlive then return end
     if not sound or sound.ClassName ~= "Sound" then return end
     local id = sound.SoundId:match("%d+")
     if not id then return end
     local repl = SOUND_REPLACEMENTS[id] or SOUND_REPLACEMENTS["rbxassetid://" .. id]
     if repl then
-        sound.SoundId = repl.primary
-        if repl.volume then sound.Volume = repl.volume end
-        if repl.pitch then sound.PlaybackSpeed = repl.pitch end
+        setProperty(sound, "SoundId", repl.primary)
+        if repl.volume then setProperty(sound, "Volume", repl.volume) end
+        if repl.pitch then setProperty(sound, "PlaybackSpeed", repl.pitch) end
     end
 end
 
 -- Real-time sound interception (Event-driven + lightweight active VM scan)
-local soundConnections = {}
 pcall(function()
     local ss = game:GetService("SoundService")
     if ss then
@@ -548,9 +640,10 @@ pcall(function()
     end))
 end)
 
-task.spawn(function()
+spawnManaged(function()
     while _scriptAlive do
         task.wait(0.1)
+        if not _scriptAlive then break end
         pcall(function()
             local fp = workspace:FindFirstChild("ViewModels") and workspace.ViewModels:FindFirstChild("FirstPerson")
             if fp then
@@ -589,21 +682,27 @@ end
 local function playCustomTrack(animator, assetId, speed)
     local sample = getSampleAnim()
     if not animator or not sample then return nil end
+    if not _scriptAlive then return nil end
     local a = sample:Clone()
+    table.insert(animationObjects, a)
     a.AnimationId = assetId
     local ok, track = pcall(animator.LoadAnimation, animator, a)
     if ok and track then
+        if not _scriptAlive then
+            pcall(function() track:Destroy() end)
+            return nil
+        end
+        table.insert(animationTracks, track)
         track:Play(0.1, 1, speed or 1)
         return track
     end
     return nil
 end
 
-local uisConn = nil
 pcall(function()
     local uis = game:GetService("UserInputService")
     uisConn = uis.InputBegan:Connect(function(input, gpe)
-        if gpe then return end
+        if gpe or not _scriptAlive then return end
         local fp = workspace:FindFirstChild("ViewModels") and workspace.ViewModels:FindFirstChild("FirstPerson")
         if not fp then return end
         for _, vmInst in ipairs(fp:GetChildren()) do
@@ -682,19 +781,6 @@ local function applySkinSwapper()
                         local origDefParent = rd(defModel.Address + OFF.Parent)
                         local origSkinParent = rd(skinModel.Address + OFF.Parent)
                         
-                        registerRestore({
-                            defSlot = defSlot,
-                            origDefInst = origDefInst,
-                            skinSlot = skinSlot,
-                            origSkinInst = origSkinInst,
-                            defAddr = defModel.Address,
-                            origDefNC = origDefNC,
-                            origDefParent = origDefParent,
-                            skinAddr = skinModel.Address,
-                            origSkinNC = origSkinNC,
-                            origSkinParent = origSkinParent
-                        })
-                        
                         -- Symmetrical Two-Way Memory Swap:
                         -- 1. Swap NameContainer pointers
                         wr(skinModel.Address + OFF.NameContainer, origDefNC)
@@ -725,62 +811,20 @@ local msg = "Swapped " .. tostring(count) .. " skins in " .. tostring(elapsed) .
 pcall(notify, msg, "Rivals Skin Changer", 4)
 print("[RivalsSkinChanger] " .. msg)
 
--- Cleanup: stops background loops, disconnects tracked events, and attempts to restore recorded swap pointers.
-local _cleaned = false
-local function fullCleanup()
-    if _cleaned then return end
-    _cleaned = true
-    _scriptAlive = false
-    
-    for _, c in ipairs(soundConnections) do
-        pcall(function() c:Disconnect() end)
-    end
-    soundConnections = {}
-
-    if uisConn then
-        pcall(function() uisConn:Disconnect() end)
-        uisConn = nil
-    end
-    
-    for _, r in ipairs(memoryRestores) do
-        pcall(function()
-            -- 1. Restore child vector slots
-            if r.defSlot and r.origDefInst then
-                wr(r.defSlot, r.origDefInst)
-            end
-            if r.skinSlot and r.origSkinInst then
-                wr(r.skinSlot, r.origSkinInst)
-            end
-            -- 2. Restore NameContainers
-            if r.defAddr and r.origDefNC then
-                wr(r.defAddr + OFF.NameContainer, r.origDefNC)
-            end
-            if r.skinAddr and r.origSkinNC then
-                wr(r.skinAddr + OFF.NameContainer, r.origSkinNC)
-            end
-            -- 3. Restore Parents
-            if r.defAddr and r.origDefParent then
-                wr(r.defAddr + OFF.Parent, r.origDefParent)
-            end
-            if r.skinAddr and r.origSkinParent then
-                wr(r.skinAddr + OFF.Parent, r.origSkinParent)
-            end
-        end)
-    end
-    memoryRestores = {}
-    _G.__RIVALS_SKIN_CHANGER_ACTIVE = false
-end
-
-_G.__RIVALS_SKIN_CHANGER_ACTIVE = true
-_G.__RIVALS_SKIN_CHANGER_RESTORE = fullCleanup
-
 -- Periodic watchdog: checks every 0.15 seconds and invokes cleanup when a listed condition is detected.
-task.spawn(function()
+spawnManaged(function()
     while _scriptAlive do
         task.wait(0.15)
+        if not _scriptAlive then break end
         if not LP or not LP.Parent or not wf or not wf.Parent or not game:IsLoaded() then
             fullCleanup()
             break
         end
     end
 end)
+end, function(err) return tostring(err) end)
+if not setupOK then
+    if cleanupCurrentRun then pcall(cleanupCurrentRun) end
+    pcall(notify, "Skin changer stopped: " .. tostring(setupError), "SC", 6)
+    print("[RivalsSkinChanger] Setup failed: " .. tostring(setupError))
+end

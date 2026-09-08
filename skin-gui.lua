@@ -1030,7 +1030,24 @@ local function draw(kind, props)
         item = {kind=kind, object=Drawing.new(kind)}
         state.drawings[poolIndex] = item
     end
-    for key, value in pairs(props) do item.object[key] = value end
+    for key, value in pairs(props) do
+        if key == "_TextSize" then
+            -- Drawing text differs between Matcha builds. Probe once per object.
+            if item.textSizeProperty == nil then
+                if pcall(function() item.object.Size = value end) then
+                    item.textSizeProperty = "Size"
+                elseif pcall(function() item.object.FontSize = value end) then
+                    item.textSizeProperty = "FontSize"
+                else
+                    item.textSizeProperty = false -- Keep the runtime's default size.
+                end
+            elseif item.textSizeProperty then
+                item.object[item.textSizeProperty] = value
+            end
+        else
+            item.object[key] = value
+        end
+    end
     item.object.Visible = true
     return item.object
 end
@@ -1040,7 +1057,7 @@ local function box(x,y,w,h,color,z)
 end
 local function label(text,x,y,color,size,z)
     local props = {Text=text, Position=Vector2.new(x,y), Color=color or palette.text,
-        FontSize=size or 15, Center=false, Outline=false, Transparency=1, ZIndex=z or 11}
+        _TextSize=size or 15, Center=false, Outline=false, Transparency=1, ZIndex=z or 11}
     if Drawing.Fonts and Drawing.Fonts.System then props.Font=Drawing.Fonts.System end
     draw("Text",props)
 end

@@ -1500,7 +1500,7 @@ state.previewName="Assault Rifle"
 state.imageCache,state.imageQueue,state.imageQueued={},{},{}
 local mouse=game:GetService("Players").LocalPlayer:GetMouse()
 local rgb=Color3.fromRGB
-local P={bg=rgb(24,25,35),panel=rgb(32,34,46),row=rgb(35,37,50),field=rgb(43,46,64),border=rgb(47,49,64),accent=rgb(166,180,227),text=rgb(227,230,241),muted=rgb(166,172,199),faint=rgb(112,121,157),white=rgb(255,255,255)}
+local P={bg=rgb(13,17,25),panel=rgb(19,25,36),row=rgb(24,33,47),field=rgb(32,45,62),border=rgb(41,57,73),accent=rgb(99,225,214),text=rgb(237,244,250),muted=rgb(179,197,213),faint=rgb(126,149,171),white=rgb(255,255,255)}
 local poolIndex=0
 local activeScene=true
 local function assign(item,key,value)
@@ -1570,7 +1570,7 @@ end
 
 -- A flat-image turn effect: keep the artwork upright and ease its width around its center.
 local function previewWidth()
-    return 180*math.cos(0.80*math.sin(state.previewPhase or 0))
+    return 210*math.cos(0.80*math.sin(state.previewPhase or 0))
 end
 
 local function filtered()
@@ -1629,31 +1629,36 @@ local function render()
     local w,h=state.w,state.h
     rounded(4,6,w,h,rgb(8,9,14),12,8);rounded(0,0,w,h,P.bg,12,9)
     rect(0,44,w,1,P.border,10)
-    text("Rivals Skin Changer",20,14,P.text,16)
+    rect(20,14,3,20,P.accent,12);text("Rivals Skin Changer",33,14,P.text,17)
     button("hide","_",w-78,10,28,25,function() state.visible=false;state.dropdown=nil end)
     button("close","X",w-42,10,28,25,function() request("close") end)
     for i,category in ipairs(CATEGORIES) do
         local chosen=category;local tx=20+(i-1)*112
-        if state.category==category then rounded(tx,58,103,30,P.field,14,11) end
+        if state.category==category then rounded(tx,58,103,30,P.field,7,11);rect(tx+14,86,75,2,P.accent,12) end
         text(category,tx+14,67,state.category==category and P.text or P.faint,12)
         hit("category:"..category,tx,58,103,30,function() state.category=chosen;state.page=1;state.dropdown=nil;mark() end)
     end
     local previewW=250;local right=w-previewW-18;local left=18;local contentW=right-left-12
     rounded(left,102,contentW,h-191,P.panel,9,11)
-    text("Weapons",left+15,118,P.text,13)
+    text(state.category.." collection",left+15,116,P.text,15)
     local _,count=configText();text(count.." selected",left+contentW-91,119,P.muted,11)
     rect(left+12,145,contentW-24,1,P.border,12)
-    local list=filtered();local rows=math.max(3,math.floor((h-296)/56));local pages=math.max(1,math.ceil(#list/rows));state.page=math.min(state.page,pages)
+    local list=filtered();local rows=math.max(3,math.floor((h-296)/64));local pages=math.max(1,math.ceil(#list/rows));state.page=math.min(state.page,pages)
     for row=1,rows do
         local weapon=list[(state.page-1)*rows+row]
         if weapon then
-            local ry=155+(row-1)*56;local skin=state.selections[weapon.name]
-            icon(skin=="Default" and weapon.name or skin,left+6,ry-5,60)
+            local ry=155+(row-1)*64;local skin=state.selections[weapon.name]
+            local focused=state.previewWeapon and state.previewWeapon.name==weapon.name
+            rounded(left+8,ry-1,contentW-16,58,focused and P.field or P.row,7,12)
+            if focused then rect(left+9,ry+10,2,34,P.accent,13) end
+            rounded(left+15,ry+4,48,48,P.bg,6,13)
+            icon(skin=="Default" and weapon.name or skin,left+6,ry-5,66)
             local nameW=math.floor(contentW*.42)-70
-            text(short(weapon.name,math.max(10,math.floor(nameW/6))),left+76,ry+15,P.muted,12)
+            text(short(weapon.name,math.max(10,math.floor(nameW/6))),left+76,ry+10,P.text,13)
+            text(skin=="Default" and "Original weapon" or "Selected skin",left+76,ry+32,P.faint,10)
             hit("preview:"..weapon.name,left+6,ry,math.floor(contentW*.43),40,function() state.previewWeapon=weapon;state.previewName=skin=="Default" and weapon.name or skin;mark() end)
             local bx=left+math.floor(contentW*.45);local bw=contentW-(bx-left)-14
-            button("weapon:"..weapon.name,short(skin,math.max(12,math.floor((bw-33)/6))).."  v",bx,ry+6,bw,30,function()
+            button("weapon:"..weapon.name,short(skin,math.max(12,math.floor((bw-33)/6))).."  v",bx,ry+13,bw,32,function()
                 state.previewWeapon=weapon;state.previewName=skin=="Default" and weapon.name or skin
                 state.dropdown=weapon;state.dropdownPage=math.floor((validSkin(weapon,skin) or 0)/7)+1;mark()
             end)
@@ -1669,24 +1674,25 @@ local function render()
         else state.status="Auto-apply off. Click Apply skins for future changes." end
         mark()
     end)
-    rounded(right,102,previewW,math.min(350,h-280),P.panel,9,11)
-    text("Preview",right+16,118,P.text,13);text("2D",right+previewW-36,119,P.accent,11)
+    rounded(right,102,previewW,math.min(362,h-258),P.panel,9,11)
+    text("Skin preview",right+16,116,P.text,15);text("2D",right+previewW-36,119,P.accent,11)
     rect(right+12,145,previewW-24,1,P.border,12)
     local name=state.previewName or "Assault Rifle"
     local data=getImage(name)
     if data then
         local width=previewWidth()
-        draw("Image",right+35+(180-width)/2,158,{Data=data,Size=Vector2.new(width,180),Color=P.white,Transparency=1,ZIndex=21})
+        draw("Image",right+20+(210-width)/2,150,{Data=data,Size=Vector2.new(width,210),Color=P.white,Transparency=1,ZIndex=21})
         state.previewItem=state.drawings[poolIndex]
     else
         text(ICON_PACKS[name] and "Loading artwork..." or "Artwork unavailable",right+48,238,P.faint,12)
     end
-    text(short(name,28),right+16,349,P.text,13)
-    text("2D turn effect",right+16,374,P.faint,11)
-    button("rotation",state.animate and "Pause rotation" or "Rotate image",right+16,402,previewW-32,28,function() state.animate=not state.animate;mark() end)
+    text(short(name,25),right+16,367,P.text,15)
+    text("2D turn effect",right+16,391,P.faint,11)
+    button("rotation",state.animate and "Pause rotation" or "Rotate image",right+16,417,previewW-32,28,function() state.animate=not state.animate;mark() end)
     rounded(right,466,previewW,math.max(42,h-555),P.panel,9,11)
-    text("Right Shift to hide",right+16,480,P.muted,11)
-    if h>625 then text("Drag a corner to resize",right+16,502,P.faint,11) end
+    text("QUICK CONTROLS",right+16,479,P.accent,10)
+    text("Right Shift  /  Show or hide",right+16,500,P.muted,11)
+    if h>690 then text("Drag corners to resize",right+16,522,P.faint,11) end
     rect(18,h-76,w-36,1,P.border,12)
     button("apply",state.busy and "Applying..." or "Apply skins",18,h-60,132,32,function() state.enabled=true;request("apply");mark() end,true)
     button("reset","Reset",160,h-60,89,32,function() resetSelections();mark() end)
@@ -1814,9 +1820,9 @@ state.renderer=task.spawn(function()
                         state.previewPhase=((state.previewPhase or 0)+dt*1.15)%(2*math.pi)
                         local width=previewWidth()
                         local item=state.previewItem
-                        item.x=state.w-250-18+35+(180-width)/2
-                        assign(item,"Size",Vector2.new(width,180))
-                        assign(item,"Position",Vector2.new(state.x+item.x,state.y+158))
+                        item.x=state.w-250-18+20+(210-width)/2
+                        assign(item,"Size",Vector2.new(width,210))
+                        assign(item,"Position",Vector2.new(state.x+item.x,state.y+150))
                     end
                 end
             else

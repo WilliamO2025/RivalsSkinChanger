@@ -1036,8 +1036,6 @@ local function draw(kind, props)
             if item.textSizeProperty == nil then
                 if pcall(function() item.object.Size = value end) then
                     item.textSizeProperty = "Size"
-                elseif pcall(function() item.object.FontSize = value end) then
-                    item.textSizeProperty = "FontSize"
                 else
                     item.textSizeProperty = false -- Keep the runtime's default size.
                 end

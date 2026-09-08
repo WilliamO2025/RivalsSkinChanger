@@ -904,7 +904,7 @@ end
 
 local state = {
     alive = true, enabled = false, busy = false, autoApply = true,
-    version = 0, pending = nil, status = "Choose skins, then click Enable / Apply skins.",
+    version = 0, pending = nil, status = "Auto-apply is on. Choose a skin to apply it.",
     selections = {}, suppressChanges = false
 }
 local byName = {}
@@ -997,10 +997,11 @@ local function selectSkin(weapon, index)
     local skin = weapon.skins[(tonumber(index) or -1) + 1]
     if not skin or state.selections[weapon.name] == skin then return end
     state.selections[weapon.name] = skin
-    if state.enabled and state.autoApply then
+    if state.autoApply then
+        state.enabled = true
         request("apply")
     else
-        state.status = "Selection changed. Click Enable / Apply skins."
+        state.status = "Selection changed. Click Apply skins."
     end
 end
 
@@ -1560,7 +1561,12 @@ local function render()
     button("previous","<",left+12,py,28,25,function() state.page=math.max(1,state.page-1);mark() end)
     text(state.page.." / "..pages,left+52,py+6,P.faint,11)
     button("next",">",left+98,py,28,25,function() state.page=math.min(pages,state.page+1);mark() end)
-    button("auto",state.autoApply and "Auto-apply: on" or "Auto-apply: off",left+contentW-157,py,144,25,function() state.autoApply=not state.autoApply;mark() end)
+    button("auto",state.autoApply and "Auto-apply: on" or "Auto-apply: off",left+contentW-157,py,144,25,function()
+        state.autoApply=not state.autoApply
+        if state.autoApply then state.enabled=true;request("apply")
+        else state.status="Auto-apply off. Click Apply skins for future changes." end
+        mark()
+    end)
     rounded(right,102,previewW,math.min(350,h-280),P.panel,9,11)
     text("Preview",right+16,118,P.text,13);text("2D",right+previewW-36,119,P.accent,11)
     rect(right+12,145,previewW-24,1,P.border,12)

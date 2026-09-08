@@ -964,6 +964,7 @@ end
 function state.Destroy()
     if not state.alive then return state.cleanupOK ~= false end
     state.alive = false
+    if state.ReleaseInput then state.ReleaseInput() end
     state.pending = nil
     -- Invalidate an engine setup which may currently be sleeping.
     _G.__RIVALS_SKIN_CHANGER_RUN_TOKEN = {}
@@ -971,6 +972,10 @@ function state.Destroy()
         pcall(task.cancel, state.worker)
     end
     state.cleanupOK = stopEngine()
+    if state.ReleaseInput then state.ReleaseInput() end
+    if state.imageWorker and task.cancel and state.imageWorker ~= coroutine.running() then
+        pcall(task.cancel, state.imageWorker)
+    end
     if state.renderer and task.cancel and state.renderer ~= coroutine.running() then
         pcall(task.cancel, state.renderer)
     end
@@ -1008,210 +1013,592 @@ local function resetSelections()
     request("reset")
 end
 
--- Standalone Drawing overlay. Input stays separate from the engine apply worker.
-state.visible, state.category, state.page = true, "Primary", 1
-state.x, state.y = 90, 90
-state.drawings, state.hitboxes = {}, {}
-state.dropdown, state.dropdownPage = nil, 1
-local mouse = game:GetService("Players").LocalPlayer:GetMouse()
-local rgb = Color3.fromRGB
-local palette = {bg=rgb(16,20,29), panel=rgb(24,30,42), field=rgb(33,41,56),
-    accent=rgb(71,220,188), text=rgb(235,240,249), muted=rgb(151,166,188), danger=rgb(220,104,114)}
-local poolIndex = 0
+local ICON_PATHS = {
+    ["10B Visits"] = "assets/images/10b-visits.png",
+    ["AK-47"] = "assets/images/ak-47.png",
+    ["AKEY-47"] = "assets/images/akey-47.png",
+    ["AUG"] = "assets/images/aug.png",
+    ["Aces"] = "assets/images/aces.png",
+    ["Advanced Satchel"] = "assets/images/advanced-satchel.png",
+    ["Air Horn"] = "assets/images/air-horn.png",
+    ["Anchor"] = "assets/images/anchor.png",
+    ["Apex Pistols"] = "assets/images/apex-pistols.png",
+    ["Apex Rifle"] = "assets/images/apex-rifle.png",
+    ["Aqua Burst"] = "assets/images/aqua-burst.png",
+    ["Arch Crossbow"] = "assets/images/arch-crossbow.png",
+    ["Arch Katana"] = "assets/images/arch-katana.png",
+    ["Arch Uzi"] = "assets/images/arch-uzi.png",
+    ["Assault Rifle"] = "assets/images/assault-rifle.png",
+    ["Bag o' Money"] = "assets/images/bag-o--money.png",
+    ["Balance"] = "assets/images/balance.png",
+    ["Balisong"] = "assets/images/balisong.png",
+    ["Balloon Axe"] = "assets/images/balloon-axe.png",
+    ["Balloon Bow"] = "assets/images/balloon-bow.png",
+    ["Balloon Launcher"] = "assets/images/balloon-launcher.png",
+    ["Balloon Shorty"] = "assets/images/balloon-shorty.png",
+    ["Balloon Shotgun"] = "assets/images/balloon-shotgun.png",
+    ["Ban Axe"] = "assets/images/ban-axe.png",
+    ["Ban Hammer"] = "assets/images/ban-hammer.png",
+    ["Banana Flare"] = "assets/images/banana-flare.png",
+    ["Bat Bow"] = "assets/images/batbow.png",
+    ["Bat Daggers"] = "assets/images/bat-daggers.png",
+    ["Bat Scythe"] = "assets/images/batscythe.png",
+    ["Battle Axe"] = "assets/images/battleaxe.png",
+    ["Beach Ball"] = "assets/images/beachball.png",
+    ["Beloved Bow"] = "assets/images/beloved-bow.png",
+    ["Blaster"] = "assets/images/blaster.png",
+    ["Blobsaw"] = "assets/images/blobsaw.png",
+    ["Boba Gun"] = "assets/images/boba-gun.png",
+    ["Boneblade"] = "assets/images/boneblade.png",
+    ["Boneclaw Horn"] = "assets/images/boneclaw-horn.png",
+    ["Boneclaw Revolver"] = "assets/images/boneclaw-revolver.png",
+    ["Boneclaw Rifle"] = "assets/images/boneclaw-rifle.png",
+    ["Boneclaw Spray"] = "assets/images/boneclawspray.png",
+    ["Boneshot"] = "assets/images/boneshot.png",
+    ["Bounce House"] = "assets/images/bounce-house.png",
+    ["Bow"] = "assets/images/bow.png",
+    ["Box of Chocolates"] = "assets/images/box-of-chocolates.png",
+    ["Boxing Gloves"] = "assets/images/boxing-gloves.png",
+    ["Brain Gun"] = "assets/images/brain-gun.png",
+    ["Brass Knuckles"] = "assets/images/brassknuckles.png",
+    ["Briefcase"] = "assets/images/briefcase.png",
+    ["Broken Hearts"] = "assets/images/broken-hearts.png",
+    ["Broomstick"] = "assets/images/broomstick.png",
+    ["Bubble Ray"] = "assets/images/bubble-ray.png",
+    ["Bubblethrower"] = "assets/images/bubblethrower.png",
+    ["Bucket of Candy"] = "assets/images/bucketofcandy.png",
+    ["Bug Net"] = "assets/images/bug-net.png",
+    ["Burst Rifle"] = "assets/images/burst-rifle.png",
+    ["Buzzsaw"] = "assets/images/buzzsaw.png",
+    ["Cactus Shotgun"] = "assets/images/cactus-shotgun.png",
+    ["Caladbolg"] = "assets/images/caladbolg.png",
+    ["Camera"] = "assets/images/camera.png",
+    ["Campfire Stick"] = "assets/images/campfirestick.png",
+    ["Candy Cane"] = "assets/images/candy-cane.png",
+    ["Cerulean Axe"] = "assets/images/cerulean-axe.png",
+    ["Chainsaw"] = "assets/images/chainsaw.png",
+    ["Chancla"] = "assets/images/chancla.png",
+    ["Coffee"] = "assets/images/coffee.png",
+    ["Compound Bow"] = "assets/images/compound-bow.png",
+    ["Cookies"] = "assets/images/cookies.png",
+    ["Crossbone"] = "assets/images/crossbone.png",
+    ["Crossbow"] = "assets/images/crossbow.png",
+    ["Crude Gunblade"] = "assets/images/crude-gunblade.png",
+    ["Cryo Scythe"] = "assets/images/cryo-scythe.png",
+    ["Crystal Katana"] = "assets/images/crystal-katana.png",
+    ["Crystal Scythe"] = "assets/images/crystal-scythe.png",
+    ["Cuddle Bomb"] = "assets/images/cuddlebomb.png",
+    ["Cyber Warpstone"] = "assets/images/cyber-warpstone.png",
+    ["DIY Tripmine"] = "assets/images/diy-tripmine.png",
+    ["Daggers"] = "assets/images/daggers.png",
+    ["Demon Shorty"] = "assets/images/demon-shorty.png",
+    ["Demon Uzi"] = "assets/images/demon-uzi.png",
+    ["Desert Eagle"] = "assets/images/desert-eagle.png",
+    ["Dev-in-the-Box"] = "assets/images/dev-in-the-box.png",
+    ["Disco Ball"] = "assets/images/disco-ball.png",
+    ["Don't Press"] = "assets/images/don-t-press.png",
+    ["Door"] = "assets/images/door.png",
+    ["Dream Bow"] = "assets/images/dream-bow.png",
+    ["Dynamite"] = "assets/images/dynamite.png",
+    ["Dynamite Gun"] = "assets/images/dynamite-gun.png",
+    ["Electro Rifle"] = "assets/images/electro-rifle.png",
+    ["Electro Uzi"] = "assets/images/electro-uzi.png",
+    ["Electropunk Warpstone"] = "assets/images/electropunk-warpstone.png",
+    ["Elf's Gunblade"] = "assets/images/elf-s-gunblade.png",
+    ["Emoji Cloud"] = "assets/images/emoji-cloud.png",
+    ["Energy Pistols"] = "assets/images/energypistols.png",
+    ["Energy Rifle"] = "assets/images/energyrifle.png",
+    ["Energy Shield"] = "assets/images/energy-shield.png",
+    ["Event Horizon"] = "assets/images/event-horizon.png",
+    ["Evil Trident"] = "assets/images/evil-trident.png",
+    ["Exogourd"] = "assets/images/exogourd.png",
+    ["Exogun"] = "assets/images/exogun.png",
+    ["Extinguisher"] = "assets/images/extinguisher.png",
+    ["Eyeball"] = "assets/images/eyeball.png",
+    ["Eyething Sniper"] = "assets/images/eyething-sniper.png",
+    ["FAMAS"] = "assets/images/famas.png",
+    ["Festive Buzzsaw"] = "assets/images/festive-buzzsaw.png",
+    ["Fighter Jet"] = "assets/images/fighter-jet.png",
+    ["Firework Gun"] = "assets/images/firework-gun.png",
+    ["Firework Launcher"] = "assets/images/firework-launcher.png",
+    ["Fist"] = "assets/images/fist.png",
+    ["Fists"] = "assets/images/fists.png",
+    ["Fists of Hurt"] = "assets/images/fists-of-hurt.png",
+    ["Fizz Bomb"] = "assets/images/fizzbomb.png",
+    ["Flamethrower"] = "assets/images/flamethrower.png",
+    ["Flamingo Floatie"] = "assets/images/flamingofloatie.png",
+    ["Flare Gun"] = "assets/images/flare-gun.png",
+    ["Flashbang"] = "assets/images/flashbang.png",
+    ["Freeze Ray"] = "assets/images/freezeray.png",
+    ["Frostbite Bow"] = "assets/images/frostbite-bow.png",
+    ["Frostbite Crossbow"] = "assets/images/frostbite-crossbow.png",
+    ["Frozen Grenade"] = "assets/images/frozengrenade.png",
+    ["Garden Shovel"] = "assets/images/garden-shovel.png",
+    ["Gearnade Launcher"] = "assets/images/gearnade-launcher.png",
+    ["Giant Pencil"] = "assets/images/giant-pencil.png",
+    ["Gingerbread AUG"] = "assets/images/gingerbread-aug.png",
+    ["Gingerbread Handgun"] = "assets/images/gingerbread-handgun.png",
+    ["Gingerbread Sniper"] = "assets/images/gingerbread-sniper.png",
+    ["Glitterthrower"] = "assets/images/glitterthrower.png",
+    ["Glorious Assault Rifle"] = "assets/images/glorious-assault-rifle.png",
+    ["Glorious Battle Axe"] = "assets/images/glorious-battle-axe.png",
+    ["Glorious Bow"] = "assets/images/glorious-bow.png",
+    ["Glorious Burst Rifle"] = "assets/images/glorious-burst-rifle.png",
+    ["Glorious Chainsaw"] = "assets/images/glorious-chainsaw.png",
+    ["Glorious Crossbow"] = "assets/images/glorious-crossbow.png",
+    ["Glorious Daggers"] = "assets/images/glorious-daggers.png",
+    ["Glorious Energy Pistols"] = "assets/images/glorious-energy-pistols.png",
+    ["Glorious Energy Rifle"] = "assets/images/glorious-energy-rifle.png",
+    ["Glorious Exogun"] = "assets/images/glorious-exogun.png",
+    ["Glorious Fists"] = "assets/images/gloriousfists.png",
+    ["Glorious Flamethrower"] = "assets/images/glorious-flamethrower.png",
+    ["Glorious Flare Gun"] = "assets/images/glorious-flare-gun.png",
+    ["Glorious Flashbang"] = "assets/images/glorious-flashbang.png",
+    ["Glorious Freeze Ray"] = "assets/images/glorious-freeze-ray.png",
+    ["Glorious Grenade"] = "assets/images/glorious-grenade.png",
+    ["Glorious Grenade Launcher"] = "assets/images/glorious-grenade-launcher.png",
+    ["Glorious Gunblade"] = "assets/images/glorious-gunblade.png",
+    ["Glorious Handgun"] = "assets/images/glorious-handgun.png",
+    ["Glorious Jump Pad"] = "assets/images/glorious-jump-pad.png",
+    ["Glorious Katana"] = "assets/images/glorious-katana.png",
+    ["Glorious Knife"] = "assets/images/glorious-knife.png",
+    ["Glorious Maul"] = "assets/images/glorious-maul.png",
+    ["Glorious Medkit"] = "assets/images/glorious-medkit.png",
+    ["Glorious Minigun"] = "assets/images/glorious-minigun.png",
+    ["Glorious Molotov"] = "assets/images/glorious-molotov.png",
+    ["Glorious Paintball Gun"] = "assets/images/glorious-paintball-gun.png",
+    ["Glorious RPG"] = "assets/images/glorious-rpg.png",
+    ["Glorious Revolver"] = "assets/images/glorious-revolver.png",
+    ["Glorious Riot Shield"] = "assets/images/glorious-riot-shield.png",
+    ["Glorious Satchel"] = "assets/images/glorious-satchel.png",
+    ["Glorious Scythe"] = "assets/images/glorious-scythe.png",
+    ["Glorious Shorty"] = "assets/images/glorious-shorty.png",
+    ["Glorious Shotgun"] = "assets/images/glorious-shotgun.png",
+    ["Glorious Slingshot"] = "assets/images/glorious-slingshot.png",
+    ["Glorious Smoke Grenade"] = "assets/images/glorious-smoke-grenade.png",
+    ["Glorious Sniper"] = "assets/images/glorious-sniper.png",
+    ["Glorious Spear"] = "assets/images/glorious-spear.png",
+    ["Glorious Spray"] = "assets/images/glorious-spray.png",
+    ["Glorious Subspace Tripmine"] = "assets/images/glorious-subspace-tripmine.png",
+    ["Glorious Trowel"] = "assets/images/glorious-trowel.png",
+    ["Glorious Uzi"] = "assets/images/glorious-uzi.png",
+    ["Glorious War Horn"] = "assets/images/glorious-war-horn.png",
+    ["Glorious Warpstone"] = "assets/images/glorious-warpstone.png",
+    ["Goalpost"] = "assets/images/goalpost.png",
+    ["Grenade"] = "assets/images/grenade.png",
+    ["Grenade Launcher"] = "assets/images/grenadelauncher.png",
+    ["Gum Ray"] = "assets/images/gum-ray.png",
+    ["Gumball Handgun"] = "assets/images/gumball-handgun.png",
+    ["Gunblade"] = "assets/images/gunblade.png",
+    ["Gunsaw"] = "assets/images/gunsaw.png",
+    ["Hacker Pistols"] = "assets/images/hacker-pistols.png",
+    ["Hacker Rifle"] = "assets/images/hacker-rifle.png",
+    ["Handgun"] = "assets/images/handgun.png",
+    ["Handsaws"] = "assets/images/handsaws.png",
+    ["Harp"] = "assets/images/harp.png",
+    ["Harpoon Crossbow"] = "assets/images/harpoon-crossbow.png",
+    ["Hazard Sign"] = "assets/images/hazardsign.png",
+    ["Hot Coals"] = "assets/images/hot-coals.png",
+    ["Hourglass"] = "assets/images/hourglass.png",
+    ["Hydro Pistols"] = "assets/images/hydro-pistols.png",
+    ["Hydro Rifle"] = "assets/images/hydro-rifle.png",
+    ["Hyper Gunblade"] = "assets/images/hyper-gunblade.png",
+    ["Hyper Shotgun"] = "assets/images/hyper-shotgun.png",
+    ["Hyper Sniper"] = "assets/images/hyper-sniper.png",
+    ["Hyperlaser Guns"] = "assets/images/hyperlaser-guns.png",
+    ["Ice Cream"] = "assets/images/icecream.png",
+    ["Ice Maul"] = "assets/images/ice-maul.png",
+    ["Jack O'Thrower"] = "assets/images/jack-o-thrower.png",
+    ["Jingle Grenade"] = "assets/images/jingle-grenade.png",
+    ["Jolly Man"] = "assets/images/jolly-man.png",
+    ["Jump Pad"] = "assets/images/jumppad.png",
+    ["Karambit"] = "assets/images/karambit.png",
+    ["Katana"] = "assets/images/katana.png",
+    ["Ketchup Gun"] = "assets/images/ketchup-gun.png",
+    ["Key Bow"] = "assets/images/keybow.png",
+    ["Key Spray"] = "assets/images/key-spray.png",
+    ["Keylisong"] = "assets/images/keylisong.png",
+    ["Keynade"] = "assets/images/keynade.png",
+    ["Keynais"] = "assets/images/keynais.png",
+    ["Keyper"] = "assets/images/keyper.png",
+    ["Keyrambit"] = "assets/images/keyrambit.png",
+    ["Keyshot"] = "assets/images/keyshot.png",
+    ["Keyst Rifle"] = "assets/images/keyst-rifle.png",
+    ["Keytana"] = "assets/images/keytana.png",
+    ["Keythe"] = "assets/images/keythe.png",
+    ["Keythrower"] = "assets/images/keythrower.png",
+    ["Keyttle Axe"] = "assets/images/keyttle-axe.png",
+    ["Keyzi"] = "assets/images/keyzi.png",
+    ["Knife"] = "assets/images/knife.png",
+    ["Lamethrower"] = "assets/images/lamethrower.png",
+    ["Laptop"] = "assets/images/laptop.png",
+    ["Lasergun 3000"] = "assets/images/lasergun-3000.png",
+    ["Lava Lamp"] = "assets/images/lava-lamp.png",
+    ["Lifeguard Satchel"] = "assets/images/lifeguardsatchel.png",
+    ["Lifeguard Whistle"] = "assets/images/lifeguardwhistle.png",
+    ["Lightbulb"] = "assets/images/lightbulb.png",
+    ["Lightning Bolt"] = "assets/images/lightning-bolt.png",
+    ["Linked Sword"] = "assets/images/linked-sword.png",
+    ["Lovely Shorty"] = "assets/images/lovely-shorty.png",
+    ["Lovely Spray"] = "assets/images/lovely-spray.png",
+    ["Lucky Horseshoe"] = "assets/images/lucky-horseshoe.png",
+    ["Machete"] = "assets/images/machete.png",
+    ["Mammoth Horn"] = "assets/images/mammoth-horn.png",
+    ["Masterpiece"] = "assets/images/masterpiece.png",
+    ["Maul"] = "assets/images/maul.png",
+    ["Medkit"] = "assets/images/medkit.png",
+    ["Medkitty"] = "assets/images/medkitty.png",
+    ["Megaphone"] = "assets/images/megaphone.png",
+    ["Midnight Festive Exogun"] = "assets/images/midnight-festive-exogun.png",
+    ["Milk & Cookies"] = "assets/images/milk---cookies.png",
+    ["Mimic Axe"] = "assets/images/mimic-axe.png",
+    ["Minigun"] = "assets/images/minigun.png",
+    ["Molotov"] = "assets/images/molotov.png",
+    ["Money Gun"] = "assets/images/money-gun.png",
+    ["Nail Gun"] = "assets/images/nail-gun.png",
+    ["New Year Energy Pistols"] = "assets/images/new-year-energy-pistols.png",
+    ["New Year Energy Rifle"] = "assets/images/new-year-energy-rifle.png",
+    ["New Year Katana"] = "assets/images/new-year-katana.png",
+    ["Nordic Axe"] = "assets/images/nordic-axe.png",
+    ["Not So Shorty"] = "assets/images/not-so-shorty.png",
+    ["Notebook Satchel"] = "assets/images/notebook-satchel.png",
+    ["Nuke Launcher"] = "assets/images/nuke-launcher.png",
+    ["Paintball Gun"] = "assets/images/paintball-gun.png",
+    ["Paintballoon Gun"] = "assets/images/paintballoon-gun.png",
+    ["Paintbrush"] = "assets/images/paintbrush.png",
+    ["Palmshot"] = "assets/images/palmshot.png",
+    ["Paper Planes"] = "assets/images/paper-planes.png",
+    ["Pearl Rifle"] = "assets/images/pearlrifle.png",
+    ["Pencil"] = "assets/images/pencil.png",
+    ["Pencil Launcher"] = "assets/images/pencil-launcher.png",
+    ["Peppergun"] = "assets/images/peppergun.png",
+    ["Peppermint Sheriff"] = "assets/images/peppermint-sheriff.png",
+    ["Phoenix Rifle"] = "assets/images/phoenix-rifle.png",
+    ["Pine Burst"] = "assets/images/pine-burst.png",
+    ["Pine Spray"] = "assets/images/pine-spray.png",
+    ["Pine Uzi"] = "assets/images/pine-uzi.png",
+    ["Pirate Hook"] = "assets/images/piratehook.png",
+    ["Pixel Burst"] = "assets/images/pixel-burst.png",
+    ["Pixel Crossbow"] = "assets/images/pixel-crossbow.png",
+    ["Pixel Flamethrower"] = "assets/images/pixel-flamethrower.png",
+    ["Pixel Flashbang"] = "assets/images/pixel-flashbang.png",
+    ["Pixel Handgun"] = "assets/images/pixel-handgun.png",
+    ["Pixel Katana"] = "assets/images/pixel-katana.png",
+    ["Pixel Minigun"] = "assets/images/pixel-minigun.png",
+    ["Pixel Sniper"] = "assets/images/pixel-sniper.png",
+    ["Plastic Shovel"] = "assets/images/plastic-shovel.png",
+    ["Pot o' Keys"] = "assets/images/pot-o--keys.png",
+    ["Potion Satchel"] = "assets/images/potion-satchel.png",
+    ["Pumpkin Carver"] = "assets/images/pumpkin-carver.png",
+    ["Pumpkin Claws"] = "assets/images/pumpkin-claws.png",
+    ["Pumpkin Handgun"] = "assets/images/pumpkin-handgun.png",
+    ["Pumpkin Launcher"] = "assets/images/pumpkin-launcher.png",
+    ["Pumpkin Minigun"] = "assets/images/pumpkin-minigun.png",
+    ["RPG"] = "assets/images/rpg.png",
+    ["RPKEY"] = "assets/images/rpkey.png",
+    ["Rainbowthrower"] = "assets/images/rainbowthrower.png",
+    ["Raven Bow"] = "assets/images/raven-bow.png",
+    ["Ray Gun"] = "assets/images/ray-gun.png",
+    ["Reindeer Slingshot"] = "assets/images/reindeer-slingshot.png",
+    ["Repulsor"] = "assets/images/repulsor.png",
+    ["Revolver"] = "assets/images/revolver.png",
+    ["Rocket Launcher"] = "assets/images/rocket-launcher.png",
+    ["Saber"] = "assets/images/saber.png",
+    ["Sakura Scythe"] = "assets/images/sakura-scythe.png",
+    ["Sandwich"] = "assets/images/sandwich.png",
+    ["Scythe"] = "assets/images/scythe.png",
+    ["Scythe of Death"] = "assets/images/scythe-of-death.png",
+    ["Shady Chicken Sandwich"] = "assets/images/shady-chicken-sandwich.png",
+    ["Sheriff"] = "assets/images/sheriff.png",
+    ["Shining Star"] = "assets/images/shining-star.png",
+    ["Shorty"] = "assets/images/shorty.png",
+    ["Shotgun"] = "assets/images/shotgun.png",
+    ["Shurikens"] = "assets/images/shurikens.png",
+    ["Singularity"] = "assets/images/singularity.png",
+    ["Skull Launcher"] = "assets/images/skull-launcher.png",
+    ["Sled"] = "assets/images/sled.png",
+    ["Sleigh Maul"] = "assets/images/sleigh-maul.png",
+    ["Slime Gun"] = "assets/images/slime-gun.png",
+    ["Slingshot"] = "assets/images/slingshot.png",
+    ["Sniper"] = "assets/images/sniper.png",
+    ["Snow Shovel"] = "assets/images/snow-shovel.png",
+    ["Snowball Gun"] = "assets/images/snowball-gun.png",
+    ["Snowball Launcher"] = "assets/images/snowball-launcher.png",
+    ["Snowblower"] = "assets/images/snowblower.png",
+    ["Snowglobe"] = "assets/images/snowglobe.png",
+    ["Soul Pistols"] = "assets/images/soul-pistols.png",
+    ["Soul Rifle"] = "assets/images/soul-rifle.png",
+    ["Spaceship Launcher"] = "assets/images/spaceship-launcher.png",
+    ["Spear"] = "assets/images/spear.png",
+    ["Spider Web"] = "assets/images/spider-web.png",
+    ["Spray Bottle"] = "assets/images/spray-bottle.png",
+    ["Spring"] = "assets/images/spring.png",
+    ["Spy Gloves"] = "assets/images/spy-gloves.png",
+    ["Squid Launcher"] = "assets/images/squid-launcher.png",
+    ["Stellar Katana"] = "assets/images/stellar-katana.png",
+    ["Stick"] = "assets/images/stick.png",
+    ["Studio Light"] = "assets/images/studio-light.png",
+    ["Subspace Tripmine"] = "assets/images/subspace-tripmine.png",
+    ["Suspicious Gift"] = "assets/images/suspicious-gift.png",
+    ["Swashbuckler"] = "assets/images/swashbuckler.png",
+    ["Teleport Disc"] = "assets/images/teleport-disc.png",
+    ["Temporal Ray"] = "assets/images/temporal-ray.png",
+    ["The Shred"] = "assets/images/the-shred.png",
+    ["Toaster"] = "assets/images/toaster.png",
+    ["Tombstone Shield"] = "assets/images/tombstone-shield.png",
+    ["Tommy Gun"] = "assets/images/tommy-gun.png",
+    ["Too Shorty"] = "assets/images/too-shorty.png",
+    ["Torch"] = "assets/images/torch.png",
+    ["Trampoline"] = "assets/images/trampoline.png",
+    ["Trick or Treat"] = "assets/images/trick-or-treat.png",
+    ["Trumpet"] = "assets/images/trumpet.png",
+    ["Unstable Warpstone"] = "assets/images/unstable-warpstone.png",
+    ["Uranium Launcher"] = "assets/images/uranium-launcher.png",
+    ["Uzi"] = "assets/images/uzi.png",
+    ["Vexed Candle"] = "assets/images/vexed-candle.png",
+    ["Violin Crossbow"] = "assets/images/violin-crossbow.png",
+    ["Void Pistols"] = "assets/images/void-pistols.png",
+    ["Void Rifle"] = "assets/images/void-rifle.png",
+    ["War Horn"] = "assets/images/war-horn.png",
+    ["Warp Handgun"] = "assets/images/warp-handgun.png",
+    ["Warpbone"] = "assets/images/warpbone.png",
+    ["Warpeye"] = "assets/images/warpeye.png",
+    ["Warpstar"] = "assets/images/warpstar.png",
+    ["Warpstone"] = "assets/images/warpstone.png",
+    ["Water Balloon"] = "assets/images/water-balloon.png",
+    ["Water Uzi"] = "assets/images/water-uzi.png",
+    ["Whoopee Cushion"] = "assets/images/whoopee-cushion.png",
+    ["Wondergun"] = "assets/images/wondergun.png",
+    ["Wrapped Flare Gun"] = "assets/images/wrapped-flare-gun.png",
+    ["Wrapped Freeze Ray"] = "assets/images/wrapped-freeze-ray.png",
+    ["Wrapped Minigun"] = "assets/images/wrapped-minigun.png",
+    ["Wrapped Shorty"] = "assets/images/wrapped-shorty.png",
+    ["Wrapped Shotgun"] = "assets/images/wrapped-shotgun.png",
+}
 
-local function draw(kind, props)
-    poolIndex = poolIndex + 1
-    local item = state.drawings[poolIndex]
-    if item and item.kind ~= kind then
-        item.object:Remove()
-        item = nil
-    end
-    if not item then
-        item = {kind=kind, object=Drawing.new(kind)}
-        state.drawings[poolIndex] = item
-    end
-    for key, value in pairs(props) do
-        if key == "_TextSize" then
-            -- Drawing text differs between Matcha builds. Probe once per object.
-            if item.textSizeProperty == nil then
-                if pcall(function() item.object.Size = value end) then
-                    item.textSizeProperty = "Size"
-                else
-                    item.textSizeProperty = false -- Keep the runtime's default size.
-                end
-            elseif item.textSizeProperty then
-                item.object[item.textSizeProperty] = value
-            end
-        else
-            item.object[key] = value
-        end
-    end
-    item.object.Visible = true
-    return item.object
+-- Retained scene: stationary frames do not write Drawing properties.
+state.visible,state.category,state.page=true,"Primary",1
+state.x,state.y,state.w,state.h=80,70,820,590
+state.drawings,state.hitboxes={},{}
+state.dropdown,state.dropdownPage=nil,1
+state.dirty=true
+state.imageCache,state.imageQueue,state.imageQueued={},{},{}
+local mouse=game:GetService("Players").LocalPlayer:GetMouse()
+local rgb=Color3.fromRGB
+local P={bg=rgb(13,17,25),panel=rgb(20,26,37),row=rgb(25,33,46),field=rgb(34,44,60),border=rgb(42,54,70),accent=rgb(100,231,195),text=rgb(236,243,250),muted=rgb(146,164,187),faint=rgb(89,110,136),white=rgb(255,255,255)}
+local poolIndex=0
+local activeScene=true
+local function assign(item,key,value)
+    local old=item.cache[key]
+    local equal=old==value
+    if not equal and (key=="Position" or key=="Size") and old~=nil and type(value)~="number" then equal=old.X==value.X and old.Y==value.Y end
+    if not equal then item.object[key]=value; item.cache[key]=value end
 end
-local function box(x,y,w,h,color,z)
-    draw("Square", {Position=Vector2.new(x,y), Size=Vector2.new(w,h), Filled=true,
-        Color=color, Transparency=1, ZIndex=z or 10})
+local function draw(kind,x,y,props)
+    poolIndex=poolIndex+1
+    local item=state.drawings[poolIndex]
+    if item and item.kind~=kind then item.object:Remove(); item=nil end
+    if not item then item={kind=kind,object=Drawing.new(kind),cache={}}; state.drawings[poolIndex]=item end
+    item.x,item.y=x,y
+    assign(item,"Position",Vector2.new(state.x+x,state.y+y))
+    for key,value in pairs(props) do
+        if key=="_TextSize" then
+            if item.canSize==nil then item.canSize=pcall(function() item.object.Size=value end); if item.canSize then item.cache.Size=value end
+            elseif item.canSize then assign(item,"Size",value) end
+        else assign(item,key,value) end
+    end
+    assign(item,"Visible",true); item.used=true
 end
-local function label(text,x,y,color,size,z)
-    local props = {Text=text, Position=Vector2.new(x,y), Color=color or palette.text,
-        _TextSize=size or 15, Center=false, Outline=false, Transparency=1, ZIndex=z or 11}
+local function rect(x,y,w,h,color,z) draw("Square",x,y,{Size=Vector2.new(w,h),Color=color,Filled=true,Transparency=1,ZIndex=z or 10}) end
+local function text(value,x,y,color,size,z)
+    local props={Text=value,Color=color or P.text,_TextSize=size or 14,Center=false,Outline=false,Transparency=1,ZIndex=z or 20}
     if Drawing.Fonts and Drawing.Fonts.System then props.Font=Drawing.Fonts.System end
-    draw("Text",props)
+    draw("Text",x,y,props)
 end
-local function button(text,x,y,w,h,callback,accent,modal)
-    box(x,y,w,h,accent and palette.accent or palette.field,modal and 31 or 12)
-    label(text,x+10,y+math.floor((h-16)/2),accent and palette.bg or palette.text,14,modal and 32 or 13)
-    table.insert(state.hitboxes,{x=x,y=y,w=w,h=h,callback=callback,modal=modal})
+local function short(s,n) return #s>n and s:sub(1,n-3).."..." or s end
+local function contains(hit,x,y) return x>=hit.x and x<=hit.x+hit.w and y>=hit.y and y<=hit.y+hit.h end
+local function hit(id,x,y,w,h,callback,modal) table.insert(state.hitboxes,{id=id,x=x,y=y,w=w,h=h,callback=callback,modal=modal}) end
+local function button(id,title,x,y,w,h,callback,accent,modal)
+    local z=modal and 41 or 16
+    rect(x,y,w,h,state.hover==id and P.border or (accent and P.accent or P.field),z)
+    text(title,x+12,y+math.floor((h-16)/2),accent and state.hover~=id and P.bg or P.text,14,z+1)
+    hit(id,x,y,w,h,callback,modal)
 end
-local function short(text,length)
-    return #text > length and text:sub(1,length-3).."..." or text
-end
-local function filteredWeapons()
-    local result={}
-    for _,weapon in ipairs(CATALOG) do
-        if weapon.category==state.category then table.insert(result,weapon) end
+local function mark() state.dirty=true end
+local function icon(name,x,y,size,z)
+    local path=ICON_PATHS[name]
+    local data=path and state.imageCache[path]
+    if path and data==nil and not state.imageQueued[path] then state.imageQueued[path]=true; table.insert(state.imageQueue,path) end
+    if type(data)=="string" then
+        draw("Image",x,y,{Data=data,Size=Vector2.new(size,size),Color=P.white,Transparency=1,ZIndex=z or 14})
+    else
+        rect(x+4,y+size*.42,size*.72,4,P.faint,z or 14)
+        rect(x+size*.30,y+size*.45,5,size*.27,P.faint,z or 14)
+        rect(x+size*.66,y+size*.31,4,size*.18,P.faint,z or 14)
     end
-    return result
 end
-local function inside(hit,mx,my)
-    return mx>=hit.x and mx<=hit.x+hit.w and my>=hit.y and my<=hit.y+hit.h
+local function filtered()
+    local list={}; for _,weapon in ipairs(CATALOG) do if weapon.category==state.category then table.insert(list,weapon) end end; return list
 end
-
+function state.ReleaseInput()
+    if state.inputCaptured and setrobloxinput then pcall(setrobloxinput,true) end
+    state.inputCaptured=false
+end
+local function captureInput(capture)
+    if capture then
+        if not state.inputCaptured and setrobloxinput then local ok,result=pcall(setrobloxinput,false); state.inputCaptured=ok and result~=false end
+    else state.ReleaseInput() end
+end
+local function showScene(show)
+    if activeScene==show then return end
+    activeScene=show
+    for _,item in ipairs(state.drawings) do assign(item,"Visible",show and item.used or false) end
+end
+local function translateScene()
+    for _,item in ipairs(state.drawings) do if item.used then assign(item,"Position",Vector2.new(state.x+item.x,state.y+item.y)) end end
+end
 local function render()
-    poolIndex=0
-    state.hitboxes={}
-    if state.visible then
-        local x,y=state.x,state.y
-        box(x+5,y+6,700,544,rgb(7,10,16),8)
-        box(x,y,700,544,palette.bg)
-        box(x,y,700,3,palette.accent)
-        label("RIVALS / SKIN STUDIO",x+20,y+18,palette.text,20)
-        label("44 weapons  /  369 skins  /  local appearances",x+20,y+47,palette.muted,13)
-        button("_",x+618,y+15,30,28,function() state.visible=false end)
-        button("X",x+656,y+15,28,28,function() request("close") end)
-        box(x+16,y+78,145,358,palette.panel)
-        for i,category in ipairs(CATEGORIES) do
-            local selected=category
-            button(category,x+26,y+90+(i-1)*45,125,35,function()
-                state.category=selected; state.page=1; state.dropdown=nil
-            end,state.category==category)
-        end
-        label("SELECT A CATEGORY",x+27,y+299,palette.muted,11)
-        label("Choose one skin",x+27,y+322,palette.text,13)
-        label("per weapon.",x+27,y+342,palette.text,13)
-        label("Default restores",x+27,y+375,palette.muted,12)
-        label("the original skin.",x+27,y+393,palette.muted,12)
-        label(state.category,x+180,y+84,palette.text,18)
-        local weapons=filteredWeapons()
-        local pages=math.max(1,math.ceil(#weapons/6))
-        state.page=math.min(state.page,pages)
-        for row=1,6 do
-            local weapon=weapons[(state.page-1)*6+row]
-            if weapon then
-                local rowY=y+116+(row-1)*45
-                label(short(weapon.name,24),x+181,rowY+9,palette.text,14)
-                button(short(state.selections[weapon.name],29).."  v",x+382,rowY,300,34,function()
-                    state.dropdown=weapon
-                    state.dropdownPage=math.floor((validSkin(weapon,state.selections[weapon.name]) or 0)/7)+1
-                end)
-            end
-        end
-        button("<",x+181,y+395,34,28,function() state.page=math.max(1,state.page-1) end)
-        label("Page "..state.page.." / "..pages,x+232,y+402,palette.muted,13)
-        button(">",x+344,y+395,34,28,function() state.page=math.min(pages,state.page+1) end)
-        button(state.autoApply and "Auto-apply: ON" or "Auto-apply: OFF",x+502,y+395,180,28,function()
-            state.autoApply=not state.autoApply
-        end)
-        button("Enable / Apply skins",x+16,y+450,220,36,function()
-            state.enabled=true; request("apply")
-        end,true)
-        button("Reset to Default",x+247,y+450,178,36,resetSelections)
-        local _,count=configText()
-        label(tostring(count).." selected",x+454,y+459,palette.muted,14)
-        label(short(state.status,88),x+18,y+497,palette.text,12)
-        label("Right Shift: hide/show  |  Drag the header  |  Use Esc to free a locked cursor",x+18,y+520,palette.muted,11)
-
-        if state.dropdown then
-            local weapon=state.dropdown
-            local dx,dy=x+220,y+88
-            box(dx-4,dy-4,430,355,rgb(8,12,19),29)
-            box(dx,dy,422,347,palette.panel,30)
-            label(weapon.name.." / skins",dx+14,dy+13,palette.text,17,32)
-            button("X",dx+379,dy+8,28,28,function() state.dropdown=nil end,false,true)
-            local pages=math.max(1,math.ceil(#weapon.skins/7))
-            for row=1,7 do
-                local index=(state.dropdownPage-1)*7+row
-                local skin=weapon.skins[index]
-                if skin then
-                    button(short(skin,44),dx+12,dy+48+(row-1)*35,398,29,function()
-                        selectSkin(weapon,index-1); state.dropdown=nil
-                    end,state.selections[weapon.name]==skin,true)
-                end
-            end
-            button("< Previous",dx+12,dy+303,113,28,function()
-                state.dropdownPage=math.max(1,state.dropdownPage-1)
-            end,false,true)
-            label(state.dropdownPage.." / "..pages,dx+179,dy+310,palette.muted,13,32)
-            button("Next >",dx+298,dy+303,112,28,function()
-                state.dropdownPage=math.min(pages,state.dropdownPage+1)
-            end,false,true)
+    poolIndex=0; state.hitboxes={}
+    local w,h=state.w,state.h
+    rect(5,7,w,h,rgb(5,8,12),8); rect(0,0,w,h,P.bg,9); rect(0,0,w,2,P.accent)
+    text("R /",22,18,P.accent,24); text("SKIN STUDIO",76,18,P.text,22); text("YOUR ARSENAL. YOUR STYLE.",77,46,P.faint,10)
+    button("hide","_",w-78,18,28,28,function() state.visible=false; state.dropdown=nil end)
+    button("close","X",w-42,18,28,28,function() request("close") end)
+    rect(18,78,164,h-159,P.panel,11); text("LOADOUT",32,94,P.faint,11)
+    for i,category in ipairs(CATEGORIES) do
+        local chosen=category; local cy=123+(i-1)*49; local selected=state.category==category
+        if selected then rect(18,cy,3,39,P.accent,13) end
+        button("category:"..category,category,29,cy,141,39,function() state.category=chosen; state.page=1; state.dropdown=nil; mark() end,selected)
+    end
+    text("44 WEAPONS",32,h-151,P.muted,11); text("369 SKIN OPTIONS",32,h-130,P.faint,10)
+    local left=202
+    text(state.category.." collection",left,83,P.text,20); text("Pick a weapon finish from its dropdown.",left,112,P.muted,12)
+    local _,count=configText(); text(tostring(count).." SELECTED",w-124,92,P.accent,11)
+    local list=filtered(); local rows=math.max(3,math.floor((h-268)/55)); local pages=math.max(1,math.ceil(#list/rows)); state.page=math.min(state.page,pages)
+    local rowW=w-left-20
+    for row=1,rows do
+        local weapon=list[(state.page-1)*rows+row]
+        if weapon then
+            local ry=144+(row-1)*55; local skin=state.selections[weapon.name]
+            rect(left,ry,rowW,48,P.row,12); icon(skin=="Default" and weapon.name or skin,left+6,ry+3,42)
+            text(short(weapon.name,24),left+55,ry+7,P.text,14)
+            text(skin=="Default" and "ORIGINAL FINISH" or "CUSTOM FINISH",left+55,ry+28,skin=="Default" and P.faint or P.accent,9)
+            local bx=left+math.floor(rowW*.48); local bw=w-32-bx
+            button("weapon:"..weapon.name,short(skin,math.max(12,math.floor((bw-35)/7))).."  v",bx,ry+7,bw,34,function()
+                state.dropdown=weapon; state.dropdownPage=math.floor((validSkin(weapon,skin) or 0)/7)+1; mark()
+            end)
         end
     end
-    for i=poolIndex+1,#state.drawings do state.drawings[i].object.Visible=false end
+    local py=h-114
+    button("previous","<",left,py,30,27,function() state.page=math.max(1,state.page-1); mark() end)
+    text(state.page.." / "..pages,left+44,py+6,P.muted,12)
+    button("next",">",left+93,py,30,27,function() state.page=math.min(pages,state.page+1); mark() end)
+    button("auto",state.autoApply and "Auto-apply  ON" or "Auto-apply  OFF",w-180,py,160,27,function() state.autoApply=not state.autoApply; mark() end)
+    rect(18,h-74,w-36,1,P.border)
+    button("apply",state.busy and "Applying..." or "Apply selected skins",20,h-59,205,36,function() state.enabled=true; request("apply"); mark() end,true)
+    button("reset","Reset to Default",236,h-59,167,36,function() resetSelections(); mark() end)
+    text(short(state.status,math.max(18,math.floor((w-438)/6))),421,h-56,P.muted,11)
+    text("RIGHT SHIFT  /  hide & release input",421,h-35,P.faint,10)
+    for _,corner in ipairs({{0,0},{w-9,0},{0,h-9},{w-9,h-9}}) do rect(corner[1],corner[2],9,2,P.accent,18) end
+    if state.dropdown then
+        local weapon=state.dropdown; local dw=math.min(458,w-60); local dh=397; local dx=math.floor((w-dw)/2); local dy=math.floor((h-dh)/2)
+        rect(dx-5,dy-5,dw+10,dh+10,rgb(7,10,16),38); rect(dx,dy,dw,dh,P.panel,39); rect(dx,dy,dw,2,P.accent,40)
+        text(weapon.name,dx+16,dy+15,P.text,19,42); text("SELECT A FINISH",dx+16,dy+42,P.faint,10,42)
+        button("dropdown-close","X",dx+dw-42,dy+14,28,28,function() state.dropdown=nil; mark() end,false,true)
+        local pages=math.max(1,math.ceil(#weapon.skins/7))
+        for row=1,7 do
+            local index=(state.dropdownPage-1)*7+row; local skin=weapon.skins[index]
+            if skin then
+                local sy=dy+66+(row-1)*39; local selected=state.selections[weapon.name]==skin
+                rect(dx+12,sy,dw-24,34,selected and P.field or P.row,40)
+                if selected then rect(dx+12,sy,2,34,P.accent,41) end
+                icon(skin=="Default" and weapon.name or skin,dx+18,sy+1,32,42)
+                text(short(skin,45),dx+62,sy+10,selected and P.accent or P.text,13,42)
+                hit("skin:"..index,dx+12,sy,dw-24,34,function() selectSkin(weapon,index-1); state.dropdown=nil; mark() end,true)
+            end
+        end
+        button("skins-previous","< Previous",dx+12,dy+354,116,28,function() state.dropdownPage=math.max(1,state.dropdownPage-1); mark() end,false,true)
+        text(state.dropdownPage.." / "..pages,dx+dw/2-15,dy+361,P.muted,12,42)
+        button("skins-next","Next >",dx+dw-128,dy+354,116,28,function() state.dropdownPage=math.min(pages,state.dropdownPage+1); mark() end,false,true)
+    end
+    for i=poolIndex+1,#state.drawings do local item=state.drawings[i]; item.used=false; assign(item,"Visible",false) end
+    state.dirty=false; state.lastStatus=state.status; state.lastBusy=state.busy
 end
-
+local function cornerAt(x,y)
+    local r=13
+    if x>=-4 and x<=r and y>=-4 and y<=r then return "nw" end
+    if x>=state.w-r and x<=state.w+4 and y>=-4 and y<=r then return "ne" end
+    if x>=-4 and x<=r and y>=state.h-r and y<=state.h+4 then return "sw" end
+    if x>=state.w-r and x<=state.w+4 and y>=state.h-r and y<=state.h+4 then return "se" end
+end
 local function click(mx,my)
-    for i=#state.hitboxes,1,-1 do
-        local hit=state.hitboxes[i]
-        if (not state.dropdown or hit.modal) and inside(hit,mx,my) then hit.callback(); return end
-    end
-    if state.dropdown then state.dropdown=nil; return end
-    if inside({x=state.x,y=state.y,w=610,h=72},mx,my) then
-        state.drag={x=mx-state.x,y=my-state.y}
-    end
+    local x,y=mx-state.x,my-state.y; local corner=not state.dropdown and cornerAt(x,y)
+    if corner then state.resize={corner=corner,x=state.x,y=state.y,w=state.w,h=state.h,mx=mx,my=my}; return end
+    for i=#state.hitboxes,1,-1 do local ht=state.hitboxes[i]; if (not state.dropdown or ht.modal) and contains(ht,x,y) then ht.callback(); return end end
+    if state.dropdown then state.dropdown=nil; mark(); return end
+    if x>=0 and x<state.w-94 and y>=0 and y<70 then state.drag={x=mx-state.x,y=my-state.y} end
 end
-
-local setupOK,setupError=pcall(render)
-if not setupOK then
-    state.Destroy()
-    pcall(notify,"Floating GUI failed: "..tostring(setupError),"Rivals Skins",8)
-    return
+local function resize(mx,my,vw,vh)
+    local r=state.resize; local left,top,right,bottom=r.x,r.y,r.x+r.w,r.y+r.h; local dx,dy=mx-r.mx,my-r.my
+    local minW,minH=math.min(700,vw),math.min(520,vh)
+    if r.corner:find("w") then left=math.max(0,math.min(r.x+dx,right-minW)) else right=math.min(vw,math.max(right+dx,left+minW)) end
+    if r.corner:find("n") then top=math.max(0,math.min(r.y+dy,bottom-minH)) else bottom=math.min(vh,math.max(bottom+dy,top+minH)) end
+    state.x,state.y=math.floor(left),math.floor(top)
+    local w,h=math.floor(right-left),math.floor(bottom-top)
+    if w~=state.w or h~=state.h then state.w,state.h=w,h; mark() end
 end
+local setupOK,setupError=pcall(function()
+    local view=workspace.CurrentCamera.ViewportSize
+    state.w=math.min(state.w,view.X); state.h=math.min(state.h,view.Y)
+    state.x=math.max(0,math.min(state.x,view.X-state.w)); state.y=math.max(0,math.min(state.y,view.Y-state.h))
+    captureInput(true); render()
+end)
+if not setupOK then state.Destroy(); pcall(notify,"GUI setup failed: "..tostring(setupError),"Rivals Skins",8); return end
+state.imageWorker=task.spawn(function()
+    local order={}
+    while state.alive do
+        task.wait(0.05); if not state.alive then break end
+        local path=table.remove(state.imageQueue,1)
+        if path then
+            local ok,data=pcall(function() return game:HttpGet("https://martinikaws.github.io/rivals-skins/"..path) end)
+            if not state.alive then break end
+            state.imageCache[path]=ok and type(data)=="string" and data:sub(1,8)=="\137PNG\r\n\26\n" and data or false
+            table.insert(order,path)
+            if #order>72 then local oldest=table.remove(order,1); state.imageCache[oldest]=nil; state.imageQueued[oldest]=nil end
+            mark()
+        end
+    end
+end)
 state.renderer=task.spawn(function()
     local wasDown,wasToggle=false,false
     while state.alive do
-        task.wait(0.03)
-        if not state.alive then break end
+        task.wait(0.016); if not state.alive then break end
         local ok,err=pcall(function()
-            local active=not isrbxactive or isrbxactive()
-            local down=ismouse1pressed()
-            local toggle=iskeypressed(0xA1)
-            if active and toggle and not wasToggle then
-                state.visible=not state.visible; state.dropdown=nil; state.drag=nil
-            end
+            local active=not isrbxactive or isrbxactive(); local down,toggle=ismouse1pressed(),iskeypressed(0xA1)
+            if active and toggle and not wasToggle then state.visible=not state.visible; state.dropdown=nil; state.drag=nil; state.resize=nil; mark() end
+            captureInput(active and state.visible)
             if active and state.visible then
                 local mx,my=mouse.X,mouse.Y
                 if down and not wasDown then click(mx,my) end
-                if state.drag then
-                    if down then
-                        local viewport=workspace.CurrentCamera.ViewportSize
-                        state.x=math.max(0,math.min(mx-state.drag.x,math.max(0,viewport.X-700)))
-                        state.y=math.max(0,math.min(my-state.drag.y,math.max(0,viewport.Y-544)))
-                    else state.drag=nil end
+                local view=workspace.CurrentCamera.ViewportSize
+                if down and state.drag then
+                    local x=math.floor(math.max(0,math.min(mx-state.drag.x,math.max(0,view.X-state.w))))
+                    local y=math.floor(math.max(0,math.min(my-state.drag.y,math.max(0,view.Y-state.h))))
+                    if x~=state.x or y~=state.y then state.x,state.y=x,y; translateScene() end
+                elseif down and state.resize then resize(mx,my,view.X,view.Y)
+                elseif not down then state.drag=nil; state.resize=nil end
+                local hover=nil
+                if not state.drag and not state.resize then
+                    for i=#state.hitboxes,1,-1 do local ht=state.hitboxes[i]; if (not state.dropdown or ht.modal) and contains(ht,mx-state.x,my-state.y) then hover=ht.id; break end end
                 end
-            end
+                if hover~=state.hover then state.hover=hover; mark() end
+                if state.lastStatus~=state.status or state.lastBusy~=state.busy then mark() end
+                if state.dirty and state.visible then render() end
+            else state.drag=nil; state.resize=nil end
+            captureInput(active and state.visible); showScene(active and state.visible)
             wasDown,wasToggle=down,toggle
-            if active then render() else
-                state.drag=nil
-                for _,item in ipairs(state.drawings) do item.object.Visible=false end
-            end
         end)
-        if not ok then
-            state.Destroy()
-            pcall(notify,"GUI stopped: "..tostring(err),"Rivals Skins",8)
-            break
-        end
+        if not ok then state.Destroy(); pcall(notify,"GUI stopped: "..tostring(err),"Rivals Skins",8); break end
     end
 end)
 

@@ -1465,6 +1465,11 @@ local function icon(name,x,y,size,z)
     else text("-",x+size/2-3,y+size/2-8,P.faint,12,z or 14) end
 end
 
+-- A flat-image turn effect: keep the artwork upright and ease its width around its center.
+local function previewWidth()
+    return 180*math.cos(0.80*math.sin(state.previewPhase or 0))
+end
+
 local function filtered()
     local list={}; for _,weapon in ipairs(CATALOG) do if weapon.category==state.category then table.insert(list,weapon) end end; return list
 end
@@ -1541,9 +1546,9 @@ local function render()
         local weapon=list[(state.page-1)*rows+row]
         if weapon then
             local ry=155+(row-1)*49;local skin=state.selections[weapon.name]
-            icon(skin=="Default" and weapon.name or skin,left+12,ry+2,36)
-            local nameW=math.floor(contentW*.42)-48
-            text(short(weapon.name,math.max(10,math.floor(nameW/6))),left+55,ry+13,P.muted,12)
+            icon(skin=="Default" and weapon.name or skin,left+8,ry-3,48)
+            local nameW=math.floor(contentW*.42)-60
+            text(short(weapon.name,math.max(10,math.floor(nameW/6))),left+66,ry+13,P.muted,12)
             hit("preview:"..weapon.name,left+6,ry,math.floor(contentW*.43),40,function() state.previewWeapon=weapon;state.previewName=skin=="Default" and weapon.name or skin;mark() end)
             local bx=left+math.floor(contentW*.45);local bw=contentW-(bx-left)-14
             button("weapon:"..weapon.name,short(skin,math.max(12,math.floor((bw-33)/6))).."  v",bx,ry+6,bw,30,function()
@@ -1563,14 +1568,14 @@ local function render()
     local name=state.previewName or "Assault Rifle"
     local data=getImage(name)
     if data then
-        local frames=state.previewFrames[name];local frame=frames and frames[state.previewFrame or 1] or data
-        draw("Image",right+35,158,{Data=frame,Size=Vector2.new(180,180),Color=P.white,Transparency=1,ZIndex=21})
+        local width=previewWidth()
+        draw("Image",right+35+(180-width)/2,158,{Data=data,Size=Vector2.new(width,180),Color=P.white,Transparency=1,ZIndex=21})
         state.previewItem=state.drawings[poolIndex]
     else
         text(ICON_PACKS[name] and "Loading artwork..." or "Artwork unavailable",right+48,238,P.faint,12)
     end
     text(short(name,28),right+16,349,P.text,13)
-    text("Rotating 2D image",right+16,374,P.faint,11)
+    text("2D turn effect",right+16,374,P.faint,11)
     button("rotation",state.animate and "Pause rotation" or "Rotate image",right+16,402,previewW-32,28,function() state.animate=not state.animate;mark() end)
     rounded(right,466,previewW,math.max(42,h-555),P.panel,9,11)
     text("Right Shift to hide",right+16,480,P.muted,11)
@@ -1592,7 +1597,7 @@ local function render()
             if skin then
                 local sy=dy+48+(row-1)*40;local selected=state.selections[weapon.name]==skin
                 rounded(dx+10,sy,dw-20,35,selected and P.field or P.row,5,40)
-                icon(skin=="Default" and weapon.name or skin,dx+17,sy+1,32,42)
+                icon(skin=="Default" and weapon.name or skin,dx+12,sy-3,40,42)
                 text(short(skin,41),dx+60,sy+11,selected and P.text or P.muted,12,42)
                 hit("skin:"..index,dx+10,sy,dw-20,35,function()
                     selectSkin(weapon,index-1);state.previewWeapon=weapon;state.previewName=skin=="Default" and weapon.name or skin;state.dropdown=nil;mark()
@@ -1660,22 +1665,17 @@ state.imageWorker=task.spawn(function()
                 mark()
             end
         end
-        local name=state.previewName
-        local encoded=name and ICON_PACKS[name] and state.encodedPacks[ICON_PACKS[name]]
-        if encoded and encoded[name] and not state.previewFrames[name] then
-            local frames={}
-            for i,data in ipairs(encoded[name]) do frames[i]=decode64(data) end
-            state.previewFrames={[name]=frames};state.previewFrame=1;mark()
-        end
+
     end
 end)
 
 state.renderer=task.spawn(function()
     local wasDown,wasToggle=false,false
-    local nextFrame=0
+    local lastTime=tick()
     while state.alive do
         task.wait(0.016);if not state.alive then break end
         local ok,err=pcall(function()
+            local now=tick();local dt=math.max(0,math.min(now-lastTime,0.05));lastTime=now
             local active=not isrbxactive or isrbxactive();local down,toggle=ismouse1pressed(),iskeypressed(0xA1)
             if active and toggle and not wasToggle then state.visible=not state.visible;state.dropdown=nil;state.drag=nil;state.resize=nil;mark() end
             captureInput(active and state.visible)
@@ -1698,12 +1698,13 @@ state.renderer=task.spawn(function()
                     if state.lastStatus~=state.status or state.lastBusy~=state.busy then mark() end
                     if state.dirty and state.visible then render() end
                     showScene(state.visible)
-                    local now=tick()
-                    local frames=state.previewFrames[state.previewName]
-                    if state.animate and not state.dropdown and frames and state.previewItem and now>=nextFrame then
-                        state.previewFrame=(state.previewFrame or 1)%#frames+1
-                        assign(state.previewItem,"Data",frames[state.previewFrame])
-                        nextFrame=now+0.125
+                    if state.animate and not state.dropdown and state.previewItem then
+                        state.previewPhase=((state.previewPhase or 0)+dt*1.15)%(2*math.pi)
+                        local width=previewWidth()
+                        local item=state.previewItem
+                        item.x=state.w-250-18+35+(180-width)/2
+                        assign(item,"Size",Vector2.new(width,180))
+                        assign(item,"Position",Vector2.new(state.x+item.x,state.y+158))
                     end
                 end
             else

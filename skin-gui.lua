@@ -1,3 +1,70 @@
+local UNAVAILABLE_SKINS = {
+ ["Beach Ball Launcher"]=true,
+ ["Boogie Board"]=true,
+ ["Harpoon"]=true,
+ ["Ice Shaver"]=true,
+ ["Inflatable Hammer"]=true,
+ ["Laser Pistol"]=true,
+ ["Lifeguard Board"]=true,
+ ["Naginata"]=true,
+ ["Paddle"]=true,
+ ["Palm Tree"]=true,
+ ["Pool Noodle"]=true,
+ ["Popsicles"]=true,
+ ["Riot Shield"]=true,
+ ["Sand Shovel"]=true,
+ ["Satchel"]=true,
+ ["Shark"]=true,
+ ["Ship In A Bottle"]=true,
+ ["Smoke Grenade"]=true,
+ ["Sol"]=true,
+ ["Spray"]=true,
+ ["Squid Flare"]=true,
+ ["Squirt Gun"]=true,
+ ["Squirt Pistol"]=true,
+ ["Squirt Revolver"]=true,
+ ["Starfish Warpstone"]=true,
+ ["Summer Handgun"]=true,
+ ["Sunburst Bow"]=true,
+ ["Sunscreen Spray"]=true,
+ ["Super Shorty"]=true,
+ ["Super Soaker"]=true,
+ ["Super Soaker Rifle"]=true,
+ ["Super Soaker Uzi"]=true,
+ ["Surfboard"]=true,
+ ["Swordfish"]=true,
+ ["Teddy Bear"]=true,
+ ["Torpedo Launcher"]=true,
+ ["Trowel"]=true,
+ ["Umbrella"]=true,
+ ["Umbrella Sniper"]=true,
+ ["Water Blaster"]=true,
+ ["Water Blaster 3000"]=true,
+ ["Water Blaster Pistols"]=true,
+ ["Water Cannon"]=true,
+ ["Water Crossbow"]=true,
+ ["Water Gun"]=true,
+ ["Water Gunblade"]=true,
+}
+
+-- Read-only validation. Missing artwork is disabled by catalog policy; model checks are separate.
+local function usableSkinModel(model)
+    if not model or model.ClassName ~= "Model" or not model.Address or model.Address == 0 then return false end
+    return model:FindFirstChildWhichIsA("BasePart", true) ~= nil
+end
+local function availableSkinModels(vm)
+    local found = {}
+    if not vm then return found end
+    for _, folder in ipairs(vm:GetChildren()) do
+        if folder.ClassName == "Folder" and folder.Name ~= "Weapons" and folder.Name ~= "Unobtainable" and folder.Name ~= "WIP" then
+            for _, model in ipairs(folder:GetChildren()) do
+                if usableSkinModel(model) then found[model.Name] = true end
+            end
+        end
+    end
+    return found
+end
+
 local CATALOG = {
     {name = "Assault Rifle", category = "Primary", skins = {"Default", "10B Visits", "AK-47", "AKEY-47", "AUG", "Boneclaw Rifle", "Gingerbread AUG", "Glorious Assault Rifle", "Pearl Rifle", "Phoenix Rifle", "Tommy Gun"}},
     {name = "Battle Axe", category = "Melee", skins = {"Default", "Balloon Axe", "Ban Axe", "Cerulean Axe", "Glorious Battle Axe", "Keyttle Axe", "Lifeguard Board", "Mimic Axe", "Nordic Axe", "Street Sign", "The Shred"}},
@@ -789,13 +856,13 @@ local function applySkinSwapper()
             local weaponName = l:sub(1, q - 1):match("^%s*(.-)%s*$")
             local skinTarget = l:sub(q + 1):match("^%s*(.-)%s*$")
             
-            ACTIVE_CONFIG_SKINS[weaponName] = skinTarget
+            -- Only register configurations after a validated swap succeeds.
             
             -- Viewmodel 3D Model Memory Swapping (Symmetric Two-Way Swap)
             local defModel = wf:FindFirstChild(weaponName)
             local skinModel = findSkinModel(skinTarget)
             
-            if defModel and skinModel and defModel.Address and skinModel.Address and defModel.Address ~= skinModel.Address then
+            if not UNAVAILABLE_SKINS[skinTarget] and usableSkinModel(skinModel) and skinModel.Name == skinTarget and defModel and defModel.Address and defModel.Address ~= skinModel.Address then
                 local skinFolder = skinModel.Parent
                 if skinFolder and skinFolder.Address then
                     local defSlot = findSlotAddressForWeapon(defModel, wf)
@@ -840,6 +907,7 @@ local function applySkinSwapper()
                         wr(defSlot, skinModel.Address)
                         wr(skinSlot, defModel.Address)
                         
+                        ACTIVE_CONFIG_SKINS[weaponName] = skinTarget
                         swappedCount = swappedCount + 1
                     end
                 end
@@ -907,6 +975,21 @@ local state = {
     version = 0, pending = nil, status = "Auto-apply is on. Choose a skin to apply it.",
     selections = {}, suppressChanges = false
 }
+state.unavailable = {}
+local modelsOK, models = pcall(function()
+    local player = game:GetService("Players").LocalPlayer
+    local scripts = player and player:FindFirstChild("PlayerScripts")
+    local assets = scripts and scripts:FindFirstChild("Assets")
+    return availableSkinModels(assets and assets:FindFirstChild("ViewModels"))
+end)
+for _, weapon in ipairs(CATALOG) do
+    for _, skin in ipairs(weapon.skins) do
+        if skin ~= "Default" then
+            if UNAVAILABLE_SKINS[skin] then state.unavailable[skin] = "Unavailable: catalog entry not ready."
+            elseif not modelsOK or not models[skin] then state.unavailable[skin] = "Unavailable: weapon model not loaded." end
+        end
+    end
+end
 local byName = {}
 for i, weapon in ipairs(CATALOG) do
     weapon.id = "rivals_skin_gui_weapon_" .. tostring(i)
@@ -925,7 +1008,7 @@ local function importSelections(values)
     if type(values) ~= "table" then return end
     for name, skin in pairs(values) do
         local weapon = byName[name]
-        if weapon and validSkin(weapon, skin) ~= nil then state.selections[name] = skin end
+        if weapon and validSkin(weapon, skin) ~= nil and not state.unavailable[skin] then state.selections[name] = skin end
     end
 end
 
@@ -948,7 +1031,7 @@ local function configText()
     local lines = {}
     for _, weapon in ipairs(CATALOG) do
         local skin = state.selections[weapon.name]
-        if skin and skin ~= "Default" then table.insert(lines, weapon.name .. "=" .. skin) end
+        if skin and skin ~= "Default" and not state.unavailable[skin] then table.insert(lines, weapon.name .. "=" .. skin) end
     end
     return table.concat(lines, "\n"), #lines
 end
@@ -995,9 +1078,11 @@ end
 local function selectSkin(weapon, index)
     if not state.alive or state.suppressChanges then return end
     local skin = weapon.skins[(tonumber(index) or -1) + 1]
-    if not skin or state.selections[weapon.name] == skin then return end
+    if not skin then return end
+    if state.unavailable[skin] then state.status=state.unavailable[skin];return end
+    if state.selections[weapon.name] == skin and skin ~= "Default" then return end
     state.selections[weapon.name] = skin
-    if state.autoApply then
+    if skin == "Default" or state.autoApply then
         state.enabled = true
         request("apply")
     else
@@ -1594,17 +1679,22 @@ local function render()
     if state.dropdown then
         local weapon=state.dropdown;local dw=420;local dh=383;local dx=math.floor((w-dw)/2);local dy=math.floor((h-dh)/2)
         rounded(dx-3,dy-3,dw+6,dh+6,rgb(8,9,14),10,38);rounded(dx,dy,dw,dh,P.panel,9,39)
-        text(weapon.name,dx+16,dy+15,P.text,14,42)
+        text(short(weapon.name,23),dx+16,dy+15,P.text,14,42)
+        button("skin-default","Default",dx+dw-132,dy+9,82,25,function() selectSkin(weapon,0);state.previewWeapon=weapon;state.previewName=weapon.name;state.dropdown=nil;mark() end,false,true)
         button("dropdown-close","X",dx+dw-42,dy+9,28,25,function() state.dropdown=nil;mark() end,false,true)
         local pages=math.max(1,math.ceil(#weapon.skins/7))
         for row=1,7 do
             local index=(state.dropdownPage-1)*7+row;local skin=weapon.skins[index]
             if skin then
                 local sy=dy+48+(row-1)*40;local selected=state.selections[weapon.name]==skin
-                rounded(dx+10,sy,dw-20,35,selected and P.field or P.row,5,40)
+                local unavailable=state.unavailable[skin]
+                if unavailable then rounded(dx+9,sy-1,dw-18,37,rgb(197,67,78),5,40) end
+                rounded(dx+10,sy,dw-20,35,selected and P.field or P.row,5,41)
                 icon(skin=="Default" and weapon.name or skin,dx+12,sy-3,40,42)
-                text(short(skin,41),dx+60,sy+11,selected and P.text or P.muted,12,42)
+                text(short(skin,unavailable and 23 or 41),dx+60,sy+11,selected and P.text or P.muted,12,42)
+                if unavailable then text("Unavailable",dx+dw-94,sy+11,rgb(239,113,121),11,42) end
                 hit("skin:"..index,dx+10,sy,dw-20,35,function()
+                    if unavailable then state.status=unavailable;mark();return end
                     selectSkin(weapon,index-1);state.previewWeapon=weapon;state.previewName=skin=="Default" and weapon.name or skin;state.dropdown=nil;mark()
                 end,true)
             end

@@ -47,22 +47,17 @@ local UNAVAILABLE_SKINS = {
  ["Water Gunblade"]=true,
 }
 
--- Read-only validation. Missing artwork is disabled by catalog policy; model checks are separate.
+-- Validate only at apply time, after the engine loads its model folders.
+-- Matcha may not implement BasePart superclass matching like Roblox does.
 local function usableSkinModel(model)
-    if not model or model.ClassName ~= "Model" or not model.Address or model.Address == 0 then return false end
-    return model:FindFirstChildWhichIsA("BasePart", true) ~= nil
-end
-local function availableSkinModels(vm)
-    local found = {}
-    if not vm then return found end
-    for _, folder in ipairs(vm:GetChildren()) do
-        if folder.ClassName == "Folder" and folder.Name ~= "Weapons" and folder.Name ~= "Unobtainable" and folder.Name ~= "WIP" then
-            for _, model in ipairs(folder:GetChildren()) do
-                if usableSkinModel(model) then found[model.Name] = true end
-            end
-        end
+    if not model or not model.Address or model.Address == 0 then return false end
+    local ok, descendants = pcall(function() return model:GetDescendants() end)
+    if not ok or type(descendants) ~= "table" then return false end
+    for _, part in ipairs(descendants) do
+        local class = part.ClassName
+        if class == "MeshPart" or class == "Part" or class == "UnionOperation" or class == "WedgePart" or class == "CornerWedgePart" or class == "TrussPart" then return true end
     end
-    return found
+    return false
 end
 
 local CATALOG = {
@@ -976,17 +971,10 @@ local state = {
     selections = {}, suppressChanges = false
 }
 state.unavailable = {}
-local modelsOK, models = pcall(function()
-    local player = game:GetService("Players").LocalPlayer
-    local scripts = player and player:FindFirstChild("PlayerScripts")
-    local assets = scripts and scripts:FindFirstChild("Assets")
-    return availableSkinModels(assets and assets:FindFirstChild("ViewModels"))
-end)
 for _, weapon in ipairs(CATALOG) do
     for _, skin in ipairs(weapon.skins) do
         if skin ~= "Default" then
-            if UNAVAILABLE_SKINS[skin] then state.unavailable[skin] = "Unavailable: catalog entry not ready."
-            elseif not modelsOK or not models[skin] then state.unavailable[skin] = "Unavailable: weapon model not loaded." end
+            if UNAVAILABLE_SKINS[skin] then state.unavailable[skin] = "Unavailable: catalog entry not ready." end
         end
     end
 end

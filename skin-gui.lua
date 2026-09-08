@@ -1,3 +1,4 @@
+local UNAVAILABLE_WEAPONS = {RPG = "Unavailable: RPG skin rig compatibility issue."}
 local UNAVAILABLE_SKINS = {
  ["Beach Ball Launcher"]=true,
  ["Boogie Board"]=true,
@@ -47,17 +48,27 @@ local UNAVAILABLE_SKINS = {
  ["Water Gunblade"]=true,
 }
 
--- Validate only at apply time, after the engine loads its model folders.
--- Matcha may not implement BasePart superclass matching like Roblox does.
-local function usableSkinModel(model)
-    if not model or not model.Address or model.Address == 0 then return false end
-    local ok, descendants = pcall(function() return model:GetDescendants() end)
-    if not ok or type(descendants) ~= "table" then return false end
-    for _, part in ipairs(descendants) do
-        local class = part.ClassName
-        if class == "MeshPart" or class == "Part" or class == "UnionOperation" or class == "WedgePart" or class == "CornerWedgePart" or class == "TrussPart" then return true end
+-- Concrete classes avoid depending on recursive superclass queries in Matcha.
+local function findSkinPart(model, recursive)
+    if not model then return nil end
+    local class=model.ClassName
+    if class=="MeshPart" or class=="Part" or class=="UnionOperation" or class=="WedgePart" or class=="CornerWedgePart" or class=="TrussPart" then return model end
+    local ok,children=pcall(function() return model:GetChildren() end)
+    if not ok or type(children)~="table" then return nil end
+    for _,child in ipairs(children) do
+        local c=child.ClassName
+        if c=="MeshPart" or c=="Part" or c=="UnionOperation" or c=="WedgePart" or c=="CornerWedgePart" or c=="TrussPart" then return child end
     end
-    return false
+    if recursive then
+        for _,child in ipairs(children) do
+            local part=findSkinPart(child,true)
+            if part then return part end
+        end
+    end
+    return nil
+end
+local function usableSkinModel(model)
+    return model and model.Address and model.Address~=0 and findSkinPart(model,true)~=nil
 end
 
 local CATALOG = {
@@ -389,7 +400,7 @@ local function fixCrossbowRig(skinModel)
         local sub = skinModel:FindFirstChild(partName)
         if sub and sub.ClassName == "Model" then
             if not sub:FindFirstChild("Primary") then
-                local firstPart = sub:FindFirstChildWhichIsA("BasePart")
+                local firstPart = findSkinPart(sub, true)
                 if firstPart then
                     pcall(function() setProperty(sub, "PrimaryPart", firstPart) end)
                 end
@@ -434,7 +445,7 @@ local function fixBowRig(skinModel)
     local arrow = skinModel:FindFirstChild("Arrow")
     if arrow and arrow.ClassName == "Model" then
         if not arrow:FindFirstChild("Primary") then
-            local p = arrow:FindFirstChildWhichIsA("BasePart")
+            local p = findSkinPart(arrow, true)
             if p then pcall(function() setProperty(arrow, "PrimaryPart", p) end) end
         end
     end
@@ -445,7 +456,7 @@ local function fixRPGRig(skinModel)
     local rocket = skinModel:FindFirstChild("Rocket")
     if rocket and rocket.ClassName == "Model" then
         if not rocket:FindFirstChild("Primary") then
-            local p = rocket:FindFirstChildWhichIsA("BasePart")
+            local p = findSkinPart(rocket, true)
             if p then pcall(function() setProperty(rocket, "PrimaryPart", p) end) end
         end
     end
@@ -466,7 +477,7 @@ local function fixGunbladeRig(skinModel)
         local sub = skinModel:FindFirstChild(partName)
         if sub and sub.ClassName == "Model" then
             if not sub:FindFirstChild("Primary") then
-                local firstPart = sub:FindFirstChildWhichIsA("BasePart")
+                local firstPart = findSkinPart(sub, true)
                 if firstPart then
                     pcall(function() setProperty(sub, "PrimaryPart", firstPart) end)
                 end
@@ -487,7 +498,7 @@ local function fixKatanaRig(skinModel)
                 wingIdx = wingIdx + 1
             end
             if not sub:FindFirstChild("Primary") then
-                local firstPart = sub:FindFirstChildWhichIsA("BasePart")
+                local firstPart = findSkinPart(sub, true)
                 if firstPart then
                     pcall(function() setProperty(sub, "PrimaryPart", firstPart) end)
                 end
@@ -505,7 +516,7 @@ local function rigSkinModel(m)
     for _, sub in ipairs(m:GetChildren()) do
         if sub.ClassName == "Model" and sub.Name ~= "Arrow" then
             if not sub:FindFirstChild("Primary") then
-                local firstPart = sub:FindFirstChildWhichIsA("BasePart")
+                local firstPart = findSkinPart(sub, true)
                 if firstPart then
                     pcall(function() setProperty(sub, "PrimaryPart", firstPart) end)
                 end
@@ -518,7 +529,7 @@ local function rigSkinModel(m)
     if m:FindFirstChild("Body") and m.Body:FindFirstChild("Primary") then
         pcall(function() setProperty(m, "PrimaryPart", m.Body.Primary) end)
     elseif not m.PrimaryPart then
-        pcall(function() setProperty(m, "PrimaryPart", m:FindFirstChildWhichIsA("BasePart", true)) end)
+        pcall(function() setProperty(m, "PrimaryPart", findSkinPart(m, true)) end)
     end
     
     for _, c in ipairs(m:GetChildren()) do
@@ -843,6 +854,10 @@ end)
 local function applySkinSwapper()
     local r2 = configText
     local swappedCount = 0
+    engineResult.skipped = {}
+    local function skipped(weapon, skin, reason)
+        table.insert(engineResult.skipped, weapon.." / "..skin..": "..reason)
+    end
 
     for _, rawLine in ipairs(r2:split(string.char(10))) do 
         local l = rawLine:gsub(string.char(13), "")
@@ -857,7 +872,7 @@ local function applySkinSwapper()
             local defModel = wf:FindFirstChild(weaponName)
             local skinModel = findSkinModel(skinTarget)
             
-            if not UNAVAILABLE_SKINS[skinTarget] and usableSkinModel(skinModel) and skinModel.Name == skinTarget and defModel and defModel.Address and defModel.Address ~= skinModel.Address then
+            if not UNAVAILABLE_WEAPONS[weaponName] and not UNAVAILABLE_SKINS[skinTarget] and usableSkinModel(skinModel) and skinModel.Name == skinTarget and defModel and defModel.Address and defModel.Address ~= skinModel.Address then
                 local skinFolder = skinModel.Parent
                 if skinFolder and skinFolder.Address then
                     local defSlot = findSlotAddressForWeapon(defModel, wf)
@@ -904,8 +919,17 @@ local function applySkinSwapper()
                         
                         ACTIVE_CONFIG_SKINS[weaponName] = skinTarget
                         swappedCount = swappedCount + 1
-                    end
-                end
+                    else skipped(weaponName,skinTarget,"model swap location missing") end
+                else skipped(weaponName,skinTarget,"skin folder missing") end
+            else
+                local reason="model not ready"
+                if UNAVAILABLE_WEAPONS[weaponName] then reason="weapon skin rig disabled"
+                elseif UNAVAILABLE_SKINS[skinTarget] then reason="catalog entry disabled"
+                elseif not skinModel then reason="skin model not found"
+                elseif skinModel.Name~=skinTarget then reason="skin name mismatch"
+                elseif not usableSkinModel(skinModel) then reason="skin has no readable physical parts"
+                elseif not defModel then reason="default weapon model not found" end
+                skipped(weaponName,skinTarget,reason)
             end
         end 
     end
@@ -919,6 +943,10 @@ engineResult.ok = true
 engineResult.count = count
 local elapsed = math.floor((tick() - t_start) * 1000)
 local msg = "Swapped " .. tostring(count) .. " skins in " .. tostring(elapsed) .. "ms!"
+if #engineResult.skipped>0 then
+    for _,reason in ipairs(engineResult.skipped) do print("[RivalsSkinChanger] Skipped "..reason) end
+    pcall(notify,engineResult.skipped[1],"Skin apply details",8)
+end
 pcall(notify, msg, "Rivals Skin Changer", 4)
 print("[RivalsSkinChanger] " .. msg)
 
@@ -974,7 +1002,8 @@ state.unavailable = {}
 for _, weapon in ipairs(CATALOG) do
     for _, skin in ipairs(weapon.skins) do
         if skin ~= "Default" then
-            if UNAVAILABLE_SKINS[skin] then state.unavailable[skin] = "Unavailable: catalog entry not ready." end
+            if UNAVAILABLE_WEAPONS[weapon.name] then state.unavailable[skin] = UNAVAILABLE_WEAPONS[weapon.name]
+            elseif UNAVAILABLE_SKINS[skin] then state.unavailable[skin] = "Unavailable: catalog entry not ready." end
         end
     end
 end
@@ -1830,7 +1859,7 @@ state.worker = task.spawn(function()
                         if result.ok then
                             state.status = "Applied " .. tostring(result.count) .. "/" .. tostring(requested) .. " selected skins."
                             if result.count < requested then
-                                state.status = state.status .. " Some models were unavailable."
+                                state.status = state.status .. " " .. ((result.skipped and result.skipped[1]) or "Some models were unavailable.")
                             end
                         else
                             state.status = tostring(result.error)

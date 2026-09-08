@@ -885,11 +885,11 @@ end
 -- Standalone floating GUI, rendered directly through Matcha's Drawing API.
 local CATEGORIES = {"Primary", "Secondary", "Melee", "Utility"}
 if not Drawing or type(Drawing.new) ~= "function" or not ismouse1pressed or not iskeypressed then
-    pcall(notify, "This GUI needs Drawing.new and Matcha mouse/key input APIs.", "Rivals Skins", 8)
+    pcall(notify, "This GUI needs Drawing.new and Matcha mouse/key input APIs.", "Rivals Skin Changer", 8)
     return
 end
 if not game or game.GameId ~= 6035872082 then
-    pcall(notify, "Open RIVALS before loading this menu.", "Rivals Skins", 6)
+    pcall(notify, "Open RIVALS before loading this menu.", "Rivals Skin Changer", 6)
     return
 end
 
@@ -897,7 +897,7 @@ local old = _G.__RIVALS_SKIN_GUI
 if old and type(old.Destroy) == "function" then
     local ok, restored = pcall(old.Destroy)
     if not ok or restored == false then
-        pcall(notify, "Previous cleanup failed; rejoin before loading the GUI.", "Rivals Skins", 8)
+        pcall(notify, "Previous cleanup failed; rejoin before loading the GUI.", "Rivals Skin Changer", 8)
         return
     end
 end
@@ -1526,8 +1526,7 @@ local function render()
     local w,h=state.w,state.h
     rounded(4,6,w,h,rgb(8,9,14),12,8);rounded(0,0,w,h,P.bg,12,9)
     rect(0,44,w,1,P.border,10)
-    text("Rivals",20,14,P.text,15);text("Appearance",74,16,P.muted,12)
-    rounded(162,12,66,22,P.field,10,11);text("STUDIO",174,17,P.muted,9)
+    text("Rivals Skin Changer",20,14,P.text,16)
     button("hide","_",w-78,10,28,25,function() state.visible=false;state.dropdown=nil end)
     button("close","X",w-42,10,28,25,function() request("close") end)
     for i,category in ipairs(CATEGORIES) do
@@ -1541,14 +1540,14 @@ local function render()
     text("Weapons",left+15,118,P.text,13)
     local _,count=configText();text(count.." selected",left+contentW-91,119,P.muted,11)
     rect(left+12,145,contentW-24,1,P.border,12)
-    local list=filtered();local rows=math.max(3,math.floor((h-289)/49));local pages=math.max(1,math.ceil(#list/rows));state.page=math.min(state.page,pages)
+    local list=filtered();local rows=math.max(3,math.floor((h-296)/56));local pages=math.max(1,math.ceil(#list/rows));state.page=math.min(state.page,pages)
     for row=1,rows do
         local weapon=list[(state.page-1)*rows+row]
         if weapon then
-            local ry=155+(row-1)*49;local skin=state.selections[weapon.name]
-            icon(skin=="Default" and weapon.name or skin,left+8,ry-3,48)
-            local nameW=math.floor(contentW*.42)-60
-            text(short(weapon.name,math.max(10,math.floor(nameW/6))),left+66,ry+13,P.muted,12)
+            local ry=155+(row-1)*56;local skin=state.selections[weapon.name]
+            icon(skin=="Default" and weapon.name or skin,left+6,ry-5,60)
+            local nameW=math.floor(contentW*.42)-70
+            text(short(weapon.name,math.max(10,math.floor(nameW/6))),left+76,ry+15,P.muted,12)
             hit("preview:"..weapon.name,left+6,ry,math.floor(contentW*.43),40,function() state.previewWeapon=weapon;state.previewName=skin=="Default" and weapon.name or skin;mark() end)
             local bx=left+math.floor(contentW*.45);local bw=contentW-(bx-left)-14
             button("weapon:"..weapon.name,short(skin,math.max(12,math.floor((bw-33)/6))).."  v",bx,ry+6,bw,30,function()
@@ -1642,7 +1641,7 @@ local setupOK,setupError=pcall(function()
     state.x=math.max(0,math.min(state.x,view.X-state.w)); state.y=math.max(0,math.min(state.y,view.Y-state.h))
     captureInput(true); render()
 end)
-if not setupOK then state.Destroy(); pcall(notify,"GUI setup failed: "..tostring(setupError),"Rivals Skins",8); return end
+if not setupOK then state.Destroy(); pcall(notify,"GUI setup failed: "..tostring(setupError),"Rivals Skin Changer",8); return end
 state.imageWorker=task.spawn(function()
     local order={}
     while state.alive do
@@ -1714,7 +1713,7 @@ state.renderer=task.spawn(function()
             captureInput(active and state.visible)
             wasDown,wasToggle=down,toggle
         end)
-        if not ok then state.Destroy();pcall(notify,"GUI stopped: "..tostring(err),"Rivals Skins",8);break end
+        if not ok then state.Destroy();pcall(notify,"GUI stopped: "..tostring(err),"Rivals Skin Changer",8);break end
     end
 end)
 
@@ -1765,4 +1764,4 @@ state.worker = task.spawn(function()
         end
     end
 end)
-pcall(notify, "Floating GUI ready. Right Shift hides/shows it.", "Rivals Skins", 7)
+pcall(notify, "Rivals Skin Changer ready. Right Shift hides/shows it.", "Rivals Skin Changer", 7)

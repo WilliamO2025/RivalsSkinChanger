@@ -1,4 +1,3 @@
--- Rivals Skins GUI: catalog selector with serialized reset-and-reapply.
 local CATALOG = {
     {name = "Assault Rifle", category = "Primary", skins = {"Default", "10B Visits", "AK-47", "AKEY-47", "AUG", "Boneclaw Rifle", "Gingerbread AUG", "Glorious Assault Rifle", "Pearl Rifle", "Phoenix Rifle", "Tommy Gun"}},
     {name = "Battle Axe", category = "Melee", skins = {"Default", "Balloon Axe", "Ban Axe", "Cerulean Axe", "Glorious Battle Axe", "Keyttle Axe", "Lifeguard Board", "Mimic Axe", "Nordic Axe", "Street Sign", "The Shred"}},
@@ -883,11 +882,10 @@ end
 return engineResult
 end
 
--- Matcha native menu. No downloaded UI library or additional remote code.
-local TAB_NAME = "Rivals Skins"
+-- Standalone floating GUI, rendered directly through Matcha's Drawing API.
 local CATEGORIES = {"Primary", "Secondary", "Melee", "Utility"}
-if not UI or type(UI.AddTab) ~= "function" or type(UI.RemoveTab) ~= "function" then
-    pcall(notify, "This GUI needs Matcha's native UI.AddTab menu API.", "Rivals Skins", 8)
+if not Drawing or type(Drawing.new) ~= "function" or not ismouse1pressed or not iskeypressed then
+    pcall(notify, "This GUI needs Drawing.new and Matcha mouse/key input APIs.", "Rivals Skins", 8)
     return
 end
 if not game or game.GameId ~= 6035872082 then
@@ -973,7 +971,11 @@ function state.Destroy()
         pcall(task.cancel, state.worker)
     end
     state.cleanupOK = stopEngine()
-    pcall(UI.RemoveTab, TAB_NAME)
+    if state.renderer and task.cancel and state.renderer ~= coroutine.running() then
+        pcall(task.cancel, state.renderer)
+    end
+    for _,item in ipairs(state.drawings or {}) do pcall(function() item.object:Remove() end) end
+    state.drawings = {}
     return state.cleanupOK
 end
 
@@ -1001,64 +1003,202 @@ local function resetSelections()
     state.suppressChanges = true
     for _, weapon in ipairs(CATALOG) do
         state.selections[weapon.name] = "Default"
-        pcall(UI.SetValue, weapon.id, 0)
     end
     state.suppressChanges = false
     request("reset")
 end
 
-local setupOK, setupError = pcall(function()
-    -- Synchronize persistent widget IDs with validated selections on every GUI launch.
-    UI.RemoveTab(TAB_NAME)
-    for _, weapon in ipairs(CATALOG) do
-        UI.SetValue(weapon.id, validSkin(weapon, state.selections[weapon.name]) or 0)
+-- Standalone Drawing overlay. Input stays separate from the engine apply worker.
+state.visible, state.category, state.page = true, "Primary", 1
+state.x, state.y = 90, 90
+state.drawings, state.hitboxes = {}, {}
+state.dropdown, state.dropdownPage = nil, 1
+local mouse = game:GetService("Players").LocalPlayer:GetMouse()
+local rgb = Color3.fromRGB
+local palette = {bg=rgb(16,20,29), panel=rgb(24,30,42), field=rgb(33,41,56),
+    accent=rgb(71,220,188), text=rgb(235,240,249), muted=rgb(151,166,188), danger=rgb(220,104,114)}
+local poolIndex = 0
+
+local function draw(kind, props)
+    poolIndex = poolIndex + 1
+    local item = state.drawings[poolIndex]
+    if item and item.kind ~= kind then
+        item.object:Remove()
+        item = nil
     end
-    UI.SetValue("rivals_skin_gui_auto_apply", true)
-    UI.AddTab(TAB_NAME, function(tab)
-        if not state.alive then return end
-        local weapons = tab:Section("Weapon categories", "Left", CATEGORIES, 520)
-        local category = CATEGORIES[(weapons.page or 0) + 1] or "Primary"
-        for _, weapon in ipairs(CATALOG) do
-            if weapon.category == category then
-                local thisWeapon = weapon
-                weapons:Combo(weapon.id, weapon.name, weapon.skins,
-                    validSkin(weapon, state.selections[weapon.name]) or 0,
-                    function(index) selectSkin(thisWeapon, index) end)
+    if not item then
+        item = {kind=kind, object=Drawing.new(kind)}
+        state.drawings[poolIndex] = item
+    end
+    for key, value in pairs(props) do item.object[key] = value end
+    item.object.Visible = true
+    return item.object
+end
+local function box(x,y,w,h,color,z)
+    draw("Square", {Position=Vector2.new(x,y), Size=Vector2.new(w,h), Filled=true,
+        Color=color, Transparency=1, ZIndex=z or 10})
+end
+local function label(text,x,y,color,size,z)
+    local props = {Text=text, Position=Vector2.new(x,y), Color=color or palette.text,
+        FontSize=size or 15, Center=false, Outline=false, Transparency=1, ZIndex=z or 11}
+    if Drawing.Fonts and Drawing.Fonts.System then props.Font=Drawing.Fonts.System end
+    draw("Text",props)
+end
+local function button(text,x,y,w,h,callback,accent,modal)
+    box(x,y,w,h,accent and palette.accent or palette.field,modal and 31 or 12)
+    label(text,x+10,y+math.floor((h-16)/2),accent and palette.bg or palette.text,14,modal and 32 or 13)
+    table.insert(state.hitboxes,{x=x,y=y,w=w,h=h,callback=callback,modal=modal})
+end
+local function short(text,length)
+    return #text > length and text:sub(1,length-3).."..." or text
+end
+local function filteredWeapons()
+    local result={}
+    for _,weapon in ipairs(CATALOG) do
+        if weapon.category==state.category then table.insert(result,weapon) end
+    end
+    return result
+end
+local function inside(hit,mx,my)
+    return mx>=hit.x and mx<=hit.x+hit.w and my>=hit.y and my<=hit.y+hit.h
+end
+
+local function render()
+    poolIndex=0
+    state.hitboxes={}
+    if state.visible then
+        local x,y=state.x,state.y
+        box(x+5,y+6,700,544,rgb(7,10,16),8)
+        box(x,y,700,544,palette.bg)
+        box(x,y,700,3,palette.accent)
+        label("RIVALS / SKIN STUDIO",x+20,y+18,palette.text,20)
+        label("44 weapons  /  369 skins  /  local appearances",x+20,y+47,palette.muted,13)
+        button("_",x+618,y+15,30,28,function() state.visible=false end)
+        button("X",x+656,y+15,28,28,function() request("close") end)
+        box(x+16,y+78,145,358,palette.panel)
+        for i,category in ipairs(CATEGORIES) do
+            local selected=category
+            button(category,x+26,y+90+(i-1)*45,125,35,function()
+                state.category=selected; state.page=1; state.dropdown=nil
+            end,state.category==category)
+        end
+        label("SELECT A CATEGORY",x+27,y+299,palette.muted,11)
+        label("Choose one skin",x+27,y+322,palette.text,13)
+        label("per weapon.",x+27,y+342,palette.text,13)
+        label("Default restores",x+27,y+375,palette.muted,12)
+        label("the original skin.",x+27,y+393,palette.muted,12)
+        label(state.category,x+180,y+84,palette.text,18)
+        local weapons=filteredWeapons()
+        local pages=math.max(1,math.ceil(#weapons/6))
+        state.page=math.min(state.page,pages)
+        for row=1,6 do
+            local weapon=weapons[(state.page-1)*6+row]
+            if weapon then
+                local rowY=y+116+(row-1)*45
+                label(short(weapon.name,24),x+181,rowY+9,palette.text,14)
+                button(short(state.selections[weapon.name],29).."  v",x+382,rowY,300,34,function()
+                    state.dropdown=weapon
+                    state.dropdownPage=math.floor((validSkin(weapon,state.selections[weapon.name]) or 0)/7)+1
+                end)
             end
         end
-
-        local controls = tab:Section("Skin controls", "Right")
-        controls:Text("44 weapons / 369 catalog skins")
-        controls:Text("Local appearances only; no account unlocks.")
-        controls:Spacing()
-        controls:Button("Enable / Apply skins", function()
-            state.enabled = true
-            request("apply")
+        button("<",x+181,y+395,34,28,function() state.page=math.max(1,state.page-1) end)
+        label("Page "..state.page.." / "..pages,x+232,y+402,palette.muted,13)
+        button(">",x+344,y+395,34,28,function() state.page=math.min(pages,state.page+1) end)
+        button(state.autoApply and "Auto-apply: ON" or "Auto-apply: OFF",x+502,y+395,180,28,function()
+            state.autoApply=not state.autoApply
         end)
-        controls:Toggle("rivals_skin_gui_auto_apply", "Auto-apply selections", true, function(value)
-            state.autoApply = value == true
-        end)
-        controls:Tip("Each apply restores the old run before applying all selected skins.")
-        controls:Button("Reset all to Default", resetSelections)
-        controls:Button("Close and restore", function() request("close") end)
-        controls:Spacing()
-        controls:Text("Status: " .. state.status)
-        controls:Text("Wing alignment is still under investigation.")
+        button("Enable / Apply skins",x+16,y+450,220,36,function()
+            state.enabled=true; request("apply")
+        end,true)
+        button("Reset to Default",x+247,y+450,178,36,resetSelections)
+        local _,count=configText()
+        label(tostring(count).." selected",x+454,y+459,palette.muted,14)
+        label(short(state.status,88),x+18,y+497,palette.text,12)
+        label("Right Shift: hide/show  |  Drag the header  |  Use Esc to free a locked cursor",x+18,y+520,palette.muted,11)
 
-        local selected = tab:Section("Selected skins", "Right", nil, 260)
-        local _, count = configText()
-        selected:Text(tostring(count) .. " custom selections")
-        for _, weapon in ipairs(CATALOG) do
-            local skin = state.selections[weapon.name]
-            if skin ~= "Default" then selected:Text(weapon.name .. ": " .. skin) end
+        if state.dropdown then
+            local weapon=state.dropdown
+            local dx,dy=x+220,y+88
+            box(dx-4,dy-4,430,355,rgb(8,12,19),29)
+            box(dx,dy,422,347,palette.panel,30)
+            label(weapon.name.." / skins",dx+14,dy+13,palette.text,17,32)
+            button("X",dx+379,dy+8,28,28,function() state.dropdown=nil end,false,true)
+            local pages=math.max(1,math.ceil(#weapon.skins/7))
+            for row=1,7 do
+                local index=(state.dropdownPage-1)*7+row
+                local skin=weapon.skins[index]
+                if skin then
+                    button(short(skin,44),dx+12,dy+48+(row-1)*35,398,29,function()
+                        selectSkin(weapon,index-1); state.dropdown=nil
+                    end,state.selections[weapon.name]==skin,true)
+                end
+            end
+            button("< Previous",dx+12,dy+303,113,28,function()
+                state.dropdownPage=math.max(1,state.dropdownPage-1)
+            end,false,true)
+            label(state.dropdownPage.." / "..pages,dx+179,dy+310,palette.muted,13,32)
+            button("Next >",dx+298,dy+303,112,28,function()
+                state.dropdownPage=math.min(pages,state.dropdownPage+1)
+            end,false,true)
         end
-    end)
-end)
+    end
+    for i=poolIndex+1,#state.drawings do state.drawings[i].object.Visible=false end
+end
+
+local function click(mx,my)
+    for i=#state.hitboxes,1,-1 do
+        local hit=state.hitboxes[i]
+        if (not state.dropdown or hit.modal) and inside(hit,mx,my) then hit.callback(); return end
+    end
+    if state.dropdown then state.dropdown=nil; return end
+    if inside({x=state.x,y=state.y,w=610,h=72},mx,my) then
+        state.drag={x=mx-state.x,y=my-state.y}
+    end
+end
+
+local setupOK,setupError=pcall(render)
 if not setupOK then
     state.Destroy()
-    pcall(notify, "Menu could not start: " .. tostring(setupError), "Rivals Skins", 8)
+    pcall(notify,"Floating GUI failed: "..tostring(setupError),"Rivals Skins",8)
     return
 end
+state.renderer=task.spawn(function()
+    local wasDown,wasToggle=false,false
+    while state.alive do
+        task.wait(0.03)
+        if not state.alive then break end
+        local ok,err=pcall(function()
+            local active=not isrbxactive or isrbxactive()
+            local down=ismouse1pressed()
+            local toggle=iskeypressed(0xA1)
+            if active and toggle and not wasToggle then
+                state.visible=not state.visible; state.dropdown=nil; state.drag=nil
+            end
+            if active and state.visible then
+                local mx,my=mouse.X,mouse.Y
+                if down and not wasDown then click(mx,my) end
+                if state.drag then
+                    if down then
+                        local viewport=workspace.CurrentCamera.ViewportSize
+                        state.x=math.max(0,math.min(mx-state.drag.x,math.max(0,viewport.X-700)))
+                        state.y=math.max(0,math.min(my-state.drag.y,math.max(0,viewport.Y-544)))
+                    else state.drag=nil end
+                end
+            end
+            wasDown,wasToggle=down,toggle
+            if active then render() else
+                state.drag=nil
+                for _,item in ipairs(state.drawings) do item.object.Visible=false end
+            end
+        end)
+        if not ok then
+            state.Destroy()
+            pcall(notify,"GUI stopped: "..tostring(err),"Rivals Skins",8)
+            break
+        end
+    end
+end)
 
 _G.__RIVALS_SKIN_GUI = state
 state.worker = task.spawn(function()
@@ -1107,4 +1247,4 @@ state.worker = task.spawn(function()
         end
     end
 end)
-pcall(notify, "Open Matcha's menu and select Rivals Skins.", "Rivals Skins", 7)
+pcall(notify, "Floating GUI ready. Right Shift hides/shows it.", "Rivals Skins", 7)

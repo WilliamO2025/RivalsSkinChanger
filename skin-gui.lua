@@ -165,7 +165,8 @@ if type(_G.__RIVALS_SKIN_CHANGER_RESTORE) == "function" then
 end
 if _G.__RIVALS_SKIN_CHANGER_RUN_TOKEN ~= runToken then return end
 
-local A = LP:WaitForChild("PlayerScripts", 5):WaitForChild("Assets", 5)
+local scripts = LP:WaitForChild("PlayerScripts", 5)
+local A = scripts and scripts:WaitForChild("Assets", 5)
 local vm = A and A:WaitForChild("ViewModels", 5)
 local wf = vm and vm:WaitForChild("Weapons", 5)
 
@@ -177,7 +178,24 @@ if _G.__RIVALS_SKIN_CHANGER_RUN_TOKEN ~= runToken then return end
 
 local mrd, mwr, pcall, ipairs, pairs = memory_read, memory_write, pcall, ipairs, pairs
 
+-- Compare the current hierarchy, not just whether an old wrapper still has a parent.
+local originalGameAddress, originalPlayerAddress = game.Address, LP.Address
+local function sessionValid()
+    local ok, valid = pcall(function()
+        if game.Address ~= originalGameAddress or not game:IsLoaded() then return false end
+        local current = game:GetService("Players").LocalPlayer
+        if not current or current.Address ~= originalPlayerAddress then return false end
+        local ps = current:FindFirstChild("PlayerScripts")
+        local assets = ps and ps:FindFirstChild("Assets")
+        local models = assets and assets:FindFirstChild("ViewModels")
+        local weapons = models and models:FindFirstChild("Weapons")
+        return assets and assets.Address == A.Address and weapons and weapons.Address == wf.Address
+    end)
+    return ok and valid == true
+end
+
 local rd = function(a) 
+    if not sessionValid() then return nil end
     local o, v = pcall(mrd, "uintptr_t", a)
     return o and v or nil 
 end
@@ -196,7 +214,7 @@ local cleanupSucceeded = true
 
 -- Record original values before this run changes them, including rig and wing pointers.
 local wr = function(a, v)
-    if not _scriptAlive then return end
+    if not _scriptAlive or not sessionValid() then return end
     if not savedMemory[a] then
         local ok, original = pcall(mrd, "uintptr_t", a)
         if not ok or original == nil then return end
@@ -207,7 +225,7 @@ local wr = function(a, v)
 end
 
 local function setProperty(object, property, value)
-    if not _scriptAlive then return end
+    if not _scriptAlive or not sessionValid() then return end
     local original = object[property]
     if original == value then return end
     local saved = savedProperties[object]
@@ -222,8 +240,9 @@ local function setProperty(object, property, value)
     object[property] = value
 end
 
-local function fullCleanup()
+local function fullCleanup(abandon)
     if cleanupFinished then return cleanupSucceeded end
+    local restore = abandon ~= true and sessionValid()
     cleanupFinished = true
     _scriptAlive = false
     for _, connection in ipairs(soundConnections) do
@@ -235,6 +254,7 @@ local function fullCleanup()
             if thread ~= coroutine.running() then pcall(task.cancel, thread) end
         end
     end
+    if restore then
     for _, track in ipairs(animationTracks) do
         pcall(function() track:Stop(0) end)
         pcall(function() track:Destroy() end)
@@ -244,6 +264,7 @@ local function fullCleanup()
     end
     -- Undo in reverse order; never pass restoration writes through the recorder.
     for i = #undoActions, 1, -1 do
+        if not sessionValid() then break end
         local entry = undoActions[i]
         if entry.address then
             local ok, result = pcall(mwr, "uintptr_t", entry.address, entry.value)
@@ -253,6 +274,7 @@ local function fullCleanup()
             pcall(function() entry.object[entry.property] = entry.value end)
         end
     end
+    end -- Never touch old instances or memory when the asset hierarchy has changed.
     managedTasks, soundConnections, animationTracks, animationObjects = {}, {}, {}, {}
     undoActions, savedMemory, savedProperties = {}, {}, {}
     _G.__RIVALS_SKIN_CHANGER_ACTIVE = false
@@ -263,6 +285,20 @@ end
 cleanupCurrentRun = fullCleanup
 _G.__RIVALS_SKIN_CHANGER_RESTORE = fullCleanup
 _G.__RIVALS_SKIN_CHANGER_ACTIVE = true
+
+-- Best effort: Matcha may not expose this Roblox event. The hierarchy watchdog remains active.
+pcall(function()
+    local connection = LP.OnTeleport:Connect(function(teleportState)
+        if tostring(teleportState):find("Failed", 1, true) then return end
+        fullCleanup()
+        local gui = _G.__RIVALS_SKIN_GUI
+        if gui and gui.alive then
+            gui.pending = nil
+            gui.status = "Transition paused skins. Apply again after loading."
+        end
+    end)
+    table.insert(soundConnections, connection)
+end)
 
 local function spawnManaged(callback)
     local thread = task.spawn(callback)
@@ -824,7 +860,7 @@ local SOUND_REPLACEMENTS = {
 }
 
 local function hookSound(sound)
-    if not _scriptAlive then return end
+    if not _scriptAlive or not sessionValid() then return end
     if not sound or sound.ClassName ~= "Sound" then return end
     local id = sound.SoundId:match("%d+")
     if not id then return end
@@ -1112,8 +1148,10 @@ spawnManaged(function()
     while _scriptAlive do
         task.wait(0.15)
         if not _scriptAlive then break end
-        if not LP or not LP.Parent or not wf or not wf.Parent or not game:IsLoaded() then
-            fullCleanup()
+        if not sessionValid() then
+            fullCleanup(true)
+            local gui = _G.__RIVALS_SKIN_GUI
+            if gui and gui.alive then gui.pending=nil;gui.status="Game assets changed. Apply again after loading." end
             break
         end
     end
@@ -2682,7 +2720,7 @@ local function captureInput(value)
     if value then if not state.inputCaptured and setrobloxinput then local ok,r=pcall(setrobloxinput,false);state.inputCaptured=ok and r~=false end
     else state.ReleaseInput() end
 end
-local pool=0;local offsetY=0;local hoverAt=0;local switches={};local animateUntil=0
+local pool=0;local offsetY=0;local displayedOffsetY=0;local hoverAt=0;local switches={};local animateUntil=0
 local function assign(item,k,v)
     local old=item.cache[k];local eq=old==v
     if not eq and (k=="Size" or k=="Position") and old and type(v)~="number" then eq=old.X==v.X and old.Y==v.Y end
@@ -2719,7 +2757,7 @@ local function hit(id,x,y,w,h,cb,modal) table.insert(state.hitboxes,{id=id,x=x,y
 local function contains(b,x,y) return x>=b.x and y>=b.y and x<=b.x+b.w and y<=b.y+b.h end
 local function button(id,t,x,y,w,h,cb,primary,modal)
     local z=modal and 52 or 16;local hovered=state.hover==id
-    if hovered and motionAllowed() and SETTINGS.effects then local t=math.min(1,(tick()-hoverAt)/.14);x=x+(1-(1-t)^3) end
+    -- Keep button geometry stationary; hover changes color only.
     round(x,y,w,h,primary and P.accent or (hovered and P.line or P.field),z,6)
     label(t,x+12,y+(h-15)/2,primary and P.bg or P.text,13,z+1);hit(id,x,y,w,h,cb,modal)
 end
@@ -2819,6 +2857,7 @@ render=function()
     round(0,0,w,h,P.bg,8,12);rect(0,42,w,1,P.line,10)
     label("R /",19,10,P.accent,20);label("Rivals Skin Changer",63,13,P.text,14)
     local _,count=configText();label(state.busy and "Applying..." or count.." selected",260,14,P.muted,11)
+    button("updates-top","Update log",w-365,7,110,28,function() state.updates=true;state.focus=nil;mark() end)
     button("global-search","Search",w-248,7,76,28,function() navigate("Skins");state.focus="search" end)
     button("settings-top","Settings",w-165,7,80,28,function() navigate("Settings") end)
     button("hide","_",w-78,7,28,28,function() state.visible=false;state.focus=nil;changed() end)
@@ -2832,7 +2871,7 @@ render=function()
         label(page,48,y+9,selected and P.text or P.muted,13)
         hit("nav:"..page,10,y,132,35,function() navigate(page) end)
     end
-    label("CLIENT 2.0",19,h-75,P.faint,10);label((({[161]="Right Shift",[45]="Insert",[117]="F6",[119]="F8"})[SETTINGS.hotkey] or "Hotkey").." to hide",19,h-54,P.muted,10)
+    label("CLIENT 2.1",19,h-75,P.faint,10);label((({[161]="Right Shift",[45]="Insert",[117]="F6",[119]="F8"})[SETTINGS.hotkey] or "Hotkey").." to hide",19,h-54,P.muted,10)
     local left=176;local right=w-292;local cw=right-left-20
     if state.page=="Settings" then
         label("Make it yours",left,66,P.text,26);label("Preferences are saved on this device.",left,101,P.muted,12)
@@ -2868,8 +2907,8 @@ render=function()
             button("save-now","Save preferences now",left+16,354,208,36,function() state.status=state.Save() and "Preferences saved" or "Local storage unavailable";mark() end)
         elseif state.settingsGroup=="About" then
             label("Rivals Skin Changer",left+20,200,P.text,22)
-            label("GUI 2.0  /  Cleanup-aware skin engine",left+20,243,P.muted,13)
-            label("Build: 2026-09-08  /  "..#CATALOG.." weapons",left+20,276,P.muted,13)
+            label("GUI 2.1  /  Cleanup-aware skin engine",left+20,243,P.muted,13)
+            label("Build: 2026-09-09  /  "..#CATALOG.." weapons",left+20,276,P.muted,13)
             label("Catalog: martinikaws.github.io/rivals-skins",left+20,309,P.muted,12)
             label("Preview uses flat artwork. It is not a 3D renderer.",left+20,350,P.faint,12)
         end
@@ -2947,6 +2986,17 @@ render=function()
         label(#list.." skins",x+mw/2-25,y+mh-34,P.faint,11,53)
         button("skins-next","Next",x+mw-95,y+mh-42,73,28,function() state.skinOffset=math.min(math.max(0,#list-rows),state.skinOffset+rows);mark() end,false,true)
     end
+    if state.updates then
+        local x,y=w/2-270,h/2-155
+        round(x,y,540,310,P.bg,60,10)
+        label("Update log",x+22,y+22,P.text,23,63)
+        label("2.1  /  September 9, 2026",x+22,y+65,P.accent,13,63)
+        label("Buttons keep stable click targets during animation.",x+22,y+103,P.muted,12,63)
+        label("Controls take priority over corner resizing.",x+22,y+135,P.muted,12,63)
+        label("Transition cleanup stops using expired asset roots.",x+22,y+167,P.muted,12,63)
+        label("Roblox crash mitigation needs an in-game retest.",x+22,y+199,P.muted,12,63)
+        button("updates-close","Close",x+22,y+249,110,32,function() state.updates=nil;mark() end,false,true)
+    end
     if state.confirm then
         local x,y=w/2-190,h/2-85;round(x,y,380,170,P.field,60,10)
         label("Reset all selected skins?",x+20,y+22,P.text,18,63);label("Every weapon will return to Default.",x+20,y+58,P.muted,12,63)
@@ -2954,28 +3004,31 @@ render=function()
         button("cancel-reset","Cancel",x+190,y+115,165,33,function() state.confirm=nil;mark() end,false,true)
     end
     for i=pool+1,#state.drawings do state.drawings[i].used=false;assign(state.drawings[i],"Visible",false) end
+    displayedOffsetY=offsetY
     state.dirty=false;state.lastStatus=state.status
 end
 local function showObjects(show)
     for _,item in ipairs(state.drawings) do assign(item,"Visible",show and item.used or false) end
 end
 local function moveObjects()
+    displayedOffsetY=offsetY
     for _,item in ipairs(state.drawings) do if item.used then assign(item,"Position",Vector2.new(state.x+item.x*SETTINGS.scale,state.y+(item.y+offsetY)*SETTINGS.scale)) end end
 end
 local function handleClick(mx,my)
-    local x,y=(mx-state.x)/SETTINGS.scale,(my-state.y)/SETTINGS.scale
+    local x,y=(mx-state.x)/SETTINGS.scale,(my-state.y)/SETTINGS.scale-displayedOffsetY
     local w,h=state.w/SETTINGS.scale,state.h/SETTINGS.scale
-    if not state.dropdown and not state.confirm then
-        local west=x<12 and x>=-3;local east=x>w-12 and x<=w+3;local north=y<12 and y>=-3;local south=y>h-12 and y<=h+3
-        if (west or east) and (north or south) then state.resize={x=state.x,y=state.y,w=state.w,h=state.h,mx=mx,my=my,west=west,north=north};return end
-    end
     for i=#state.hitboxes,1,-1 do local b=state.hitboxes[i]
         local allowed=not state.dropdown or b.modal
+        if state.updates then allowed=b.id=="updates-close" end
         if state.confirm then allowed=b.id=="confirm-reset" or b.id=="cancel-reset" end
         if allowed and contains(b,x,y) then b.callback();return end
     end
+    if not state.dropdown and not state.confirm and not state.updates then
+        local west=x<12 and x>=-3;local east=x>w-12 and x<=w+3;local north=y<12 and y>=-3;local south=y>h-12 and y<=h+3
+        if (west or east) and (north or south) then state.resize={x=state.x,y=state.y,w=state.w,h=state.h,mx=mx,my=my,west=west,north=north};return end
+    end
     state.focus=nil
-    if not state.dropdown and not state.confirm and y>=0 and y<42 and x>=0 and x<w-260 then state.drag={x=mx-state.x,y=my-state.y} end
+    if not state.dropdown and not state.confirm and not state.updates and y>=0 and y<42 and x>=0 and x<w-365 then state.drag={x=mx-state.x,y=my-state.y} end
 end
 local keyWas={};local repeatAt={}
 local function inputText(now)
@@ -3026,7 +3079,7 @@ state.renderer=task.spawn(function()
                 elseif down and state.turnDrag then state.previewPhase=state.turnDrag.phase+(mouse.X-state.turnDrag.x)*.012;mark()
                 elseif not down then if state.drag or state.resize then mark() end;state.drag=nil;state.resize=nil;state.turnDrag=nil end
                 local hover
-                if not state.drag and not state.resize then for i=#state.hitboxes,1,-1 do local b=state.hitboxes[i];if (not state.dropdown or b.modal) and contains(b,(mouse.X-state.x)/SETTINGS.scale,(mouse.Y-state.y)/SETTINGS.scale) then hover=b.id;break end end end
+                if not state.drag and not state.resize then for i=#state.hitboxes,1,-1 do local b=state.hitboxes[i];if (not state.dropdown or b.modal) and contains(b,(mouse.X-state.x)/SETTINGS.scale,(mouse.Y-state.y)/SETTINGS.scale-displayedOffsetY) then hover=b.id;break end end end
                 if hover~=state.hover then state.hover=hover;hoverAt=now;animateUntil=now+.15;mark() end
                 if motionAllowed() and now<animateUntil and not state.drag then mark() end
                 if state.lastStatus~=state.status then if state.status:find("Applied",1,true) then state.successUntil=now+1.2 end;changed() end

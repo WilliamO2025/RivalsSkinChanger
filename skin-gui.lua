@@ -180,6 +180,7 @@ local mrd, mwr, pcall, ipairs, pairs = memory_read, memory_write, pcall, ipairs,
 
 -- Compare the current hierarchy, not just whether an old wrapper still has a parent.
 local originalGameAddress, originalPlayerAddress = game.Address, LP.Address
+local originalWeaponsAddress = wf.Address
 local function sessionValid()
     local ok, valid = pcall(function()
         if game.Address ~= originalGameAddress or not game:IsLoaded() then return false end
@@ -293,8 +294,7 @@ pcall(function()
         fullCleanup()
         local gui = _G.__RIVALS_SKIN_GUI
         if gui and gui.alive then
-            gui.pending = nil
-            gui.status = "Transition paused skins. Apply again after loading."
+            if gui.BeginTransition then gui.BeginTransition(originalWeaponsAddress) end
         end
     end)
     table.insert(soundConnections, connection)
@@ -1151,7 +1151,7 @@ spawnManaged(function()
         if not sessionValid() then
             fullCleanup(true)
             local gui = _G.__RIVALS_SKIN_GUI
-            if gui and gui.alive then gui.pending=nil;gui.status="Game assets changed. Apply again after loading." end
+            if gui and gui.alive and gui.BeginTransition then gui.BeginTransition(originalWeaponsAddress) end
             break
         end
     end
@@ -1708,6 +1708,50 @@ local ICON_PACKS = {
  ["Wrapped Shorty"]="weapon-33.json",
  ["Wrapped Shotgun"]="weapon-34.json",
 }
+
+-- The existing worker owns resumption; no second apply loop or script instance.
+function state.BeginTransition(oldRoot)
+    if not state.alive then return end
+    state.pending = nil
+    state.resume = {oldRoot=oldRoot, sawGap=false}
+    state.status = "Waiting for next match assets..."
+end
+
+local function readyRoot()
+    local ok, key = pcall(function()
+        if not game:IsLoaded() or game.GameId ~= 6035872082 then return nil end
+        local player = game:GetService("Players").LocalPlayer
+        local scripts = player and player:FindFirstChild("PlayerScripts")
+        local assets = scripts and scripts:FindFirstChild("Assets")
+        local models = assets and assets:FindFirstChild("ViewModels")
+        local weapons = models and models:FindFirstChild("Weapons")
+        if not weapons or not weapons.Address then return nil end
+        local children = weapons:GetChildren()
+        if #children == 0 then return nil end
+        -- Include membership so gradual asset loading restarts the settling timer.
+        local ids = {}
+        for _, child in ipairs(children) do table.insert(ids,tostring(child.Address)) end
+        table.sort(ids)
+        return tostring(weapons.Address)..":"..table.concat(ids,",")
+    end)
+    return ok and key or nil
+end
+
+local function pollResume()
+    local resume = state.resume
+    if not resume or not state.alive or state.busy then return end
+    local key = readyRoot()
+    if not key then resume.sawGap=true;resume.key=nil;return end
+    local root = key:match("^([^:]+):")
+    if root == tostring(resume.oldRoot) and not resume.sawGap then return end
+    if resume.key ~= key then resume.key=key;resume.readyAt=tick();return end
+    if tick()-resume.readyAt < 2 then return end
+    state.resume=nil
+    if state.autoApply then
+        local _, count = configText()
+        if count>0 then request("apply");state.status="Match ready. Reapplying selected skins..." end
+    else state.status="Match ready. Auto apply is off." end
+end
 
 local ICON_URLS = {
 ["Assault Rifle"]="https://tr.rbxcdn.com/180DAY-092e1e800488327ff1373cde65a1b135/150/150/Image/Png/noFilter",
@@ -2871,7 +2915,7 @@ render=function()
         label(page,48,y+9,selected and P.text or P.muted,13)
         hit("nav:"..page,10,y,132,35,function() navigate(page) end)
     end
-    label("CLIENT 2.1",19,h-75,P.faint,10);label((({[161]="Right Shift",[45]="Insert",[117]="F6",[119]="F8"})[SETTINGS.hotkey] or "Hotkey").." to hide",19,h-54,P.muted,10)
+    label("CLIENT 2.2",19,h-75,P.faint,10);label((({[161]="Right Shift",[45]="Insert",[117]="F6",[119]="F8"})[SETTINGS.hotkey] or "Hotkey").." to hide",19,h-54,P.muted,10)
     local left=176;local right=w-292;local cw=right-left-20
     if state.page=="Settings" then
         label("Make it yours",left,66,P.text,26);label("Preferences are saved on this device.",left,101,P.muted,12)
@@ -2907,7 +2951,7 @@ render=function()
             button("save-now","Save preferences now",left+16,354,208,36,function() state.status=state.Save() and "Preferences saved" or "Local storage unavailable";mark() end)
         elseif state.settingsGroup=="About" then
             label("Rivals Skin Changer",left+20,200,P.text,22)
-            label("GUI 2.1  /  Cleanup-aware skin engine",left+20,243,P.muted,13)
+            label("GUI 2.2  /  Cleanup-aware skin engine",left+20,243,P.muted,13)
             label("Build: 2026-09-09  /  "..#CATALOG.." weapons",left+20,276,P.muted,13)
             label("Catalog: martinikaws.github.io/rivals-skins",left+20,309,P.muted,12)
             label("Preview uses flat artwork. It is not a 3D renderer.",left+20,350,P.faint,12)
@@ -2990,11 +3034,11 @@ render=function()
         local x,y=w/2-270,h/2-155
         round(x,y,540,310,P.bg,60,10)
         label("Update log",x+22,y+22,P.text,23,63)
-        label("2.1  /  September 9, 2026",x+22,y+65,P.accent,13,63)
-        label("Buttons keep stable click targets during animation.",x+22,y+103,P.muted,12,63)
-        label("Controls take priority over corner resizing.",x+22,y+135,P.muted,12,63)
-        label("Transition cleanup stops using expired asset roots.",x+22,y+167,P.muted,12,63)
-        label("Roblox crash mitigation needs an in-game retest.",x+22,y+199,P.muted,12,63)
+        label("2.2  /  September 9, 2026",x+22,y+65,P.accent,13,63)
+        label("Selected skins reapply after match assets settle.",x+22,y+103,P.muted,12,63)
+        label("Auto apply waits for two seconds of stable assets.",x+22,y+135,P.muted,12,63)
+        label("Transition cleanup guards remain enabled.",x+22,y+167,P.muted,12,63)
+        label("Keep Auto apply on for automatic match resumption.",x+22,y+199,P.muted,12,63)
         button("updates-close","Close",x+22,y+249,110,32,function() state.updates=nil;mark() end,false,true)
     end
     if state.confirm then
@@ -3108,7 +3152,10 @@ state.worker = task.spawn(function()
     while state.alive do
         task.wait(0.15)
         if not state.alive then break end
+        pollResume()
         local action = state.pending
+        if state.resume and action == "apply" then action=nil end
+        if action == "reset" then state.resume=nil end
         if action then
             state.pending = nil
             local version = state.version

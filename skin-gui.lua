@@ -1712,6 +1712,7 @@ local ICON_PACKS = {
 -- The existing worker owns resumption; no second apply loop or script instance.
 function state.BeginTransition(oldRoot)
     if not state.alive then return end
+    if state.resume then return end
     state.pending = nil
     state.resume = {oldRoot=oldRoot, sawGap=false}
     state.status = "Waiting for next match assets..."
@@ -1738,15 +1739,30 @@ local function readyRoot()
 end
 
 local function pollResume()
-    local resume = state.resume
-    if not resume or not state.alive or state.busy then return end
+    if not state.alive or state.busy then return end
     local key = readyRoot()
+    local root = key and key:match("^([^:]+):")
+    -- Observe the hierarchy ourselves; external runtimes may not expose OnTeleport.
+    if not state.resume then
+        if state.observedRoot and root ~= state.observedRoot then
+            state.BeginTransition(state.observedRoot)
+            if not stopEngine() then
+                state.resume=nil;state.observedRoot=nil
+                state.status="Cleanup failed. Rejoin before applying again."
+                return
+            end
+        elseif not state.observedRoot and root then
+            state.observedRoot=root
+        end
+    end
+    local resume = state.resume
+    if not resume then return end
     if not key then resume.sawGap=true;resume.key=nil;return end
-    local root = key:match("^([^:]+):")
     if root == tostring(resume.oldRoot) and not resume.sawGap then return end
     if resume.key ~= key then resume.key=key;resume.readyAt=tick();return end
     if tick()-resume.readyAt < 2 then return end
     state.resume=nil
+    state.observedRoot=root
     if state.autoApply then
         local _, count = configText()
         if count>0 then request("apply");state.status="Match ready. Reapplying selected skins..." end
@@ -2919,7 +2935,7 @@ render=function()
         label(page,48,y+9,selected and P.text or P.muted,13)
         hit("nav:"..page,10,y,132,35,function() navigate(page) end)
     end
-    label("CLIENT 2.3",19,h-75,P.faint,10);label((({[161]="Right Shift",[45]="Insert",[117]="F6",[119]="F8"})[SETTINGS.hotkey] or "Hotkey").." to hide",19,h-54,P.muted,10)
+    label("CLIENT 2.4",19,h-75,P.faint,10);label((({[161]="Right Shift",[45]="Insert",[117]="F6",[119]="F8"})[SETTINGS.hotkey] or "Hotkey").." to hide",19,h-54,P.muted,10)
     local left=176;local right=w-292;local cw=right-left-20
     if state.page=="Settings" then
         label("Make it yours",left,66,P.text,26);label("Preferences are saved on this device.",left,101,P.muted,12)
@@ -2955,7 +2971,7 @@ render=function()
             button("save-now","Save preferences now",left+16,354,208,36,function() state.status=state.Save() and "Preferences saved" or "Local storage unavailable";mark() end)
         elseif state.settingsGroup=="About" then
             label("Rivals Skin Changer",left+20,200,P.text,22)
-            label("GUI 2.3  /  Cleanup-aware skin engine",left+20,243,P.muted,13)
+            label("GUI 2.4  /  Cleanup-aware skin engine",left+20,243,P.muted,13)
             label("Build: 2026-09-10  /  "..#CATALOG.." weapons",left+20,276,P.muted,13)
             label("Catalog: martinikaws.github.io/rivals-skins",left+20,309,P.muted,12)
             label("Preview uses flat artwork. It is not a 3D renderer.",left+20,350,P.faint,12)
@@ -3038,11 +3054,11 @@ render=function()
         local x,y=w/2-270,h/2-155
         round(x,y,540,310,P.bg,60,10)
         label("Update log",x+22,y+22,P.text,23,63)
-        label("2.3  /  September 10, 2026",x+22,y+65,P.accent,13,63)
-        label("Rotate artwork now controls preview motion directly.",x+22,y+103,P.muted,12,63)
-        label("Dragging artwork pauses rotation until release.",x+22,y+135,P.muted,12,63)
-        label("Artwork requests 420px sources with fallback.",x+22,y+167,P.muted,12,63)
-        label("Auto apply cannot restart a cleared Matcha session.",x+22,y+199,P.muted,12,63)
+        label("2.4  /  September 10, 2026",x+22,y+65,P.accent,13,63)
+        label("GUI retries temporary loading errors automatically.",x+22,y+103,P.muted,12,63)
+        label("Mouse references refresh after match changes.",x+22,y+135,P.muted,12,63)
+        label("Match detection no longer needs teleport events.",x+22,y+167,P.muted,12,63)
+        label("Existing cleanup guards remain enabled.",x+22,y+199,P.muted,12,63)
         button("updates-close","Close",x+22,y+249,110,32,function() state.updates=nil;mark() end,false,true)
     end
     if state.confirm then
@@ -3101,10 +3117,20 @@ end
 captureInput(state.visible)
 state.renderer=task.spawn(function()
     local wasDown,wasHot=false,false;local last=tick();local saveAt=tick()+1;local resizeAt=0
+    local refreshAt=0;local retryAt=0;local failureCount=0
     while state.alive do
         task.wait(SETTINGS.lowPower and .033 or .016);if not state.alive then break end
+        if tick()>=retryAt then
         local ok,err=pcall(function()
             local now=tick();local dt=math.min(.05,math.max(0,now-last));last=now
+            if now>=refreshAt then
+                local player=game:GetService("Players").LocalPlayer
+                local camera=workspace.CurrentCamera
+                if not player or not camera then error("Waiting for player and camera") end
+                local currentMouse=player:GetMouse()
+                if not currentMouse then error("Waiting for mouse") end
+                mouse=currentMouse;refreshAt=now+.5
+            end
             local active=not isrbxactive or isrbxactive();local hot=iskeypressed(SETTINGS.hotkey);local down=ismouse1pressed()
             if active and hot and not wasHot and not state.focus then state.visible=not state.visible;state.drag=nil;state.resize=nil;state.dropdown=nil;state.confirm=nil;mark() end
             local target=state.visible and 1 or 0
@@ -3147,7 +3173,19 @@ state.renderer=task.spawn(function()
             if dirtySave and now>=saveAt then state.Save();saveAt=now+1 end
             wasDown,wasHot=down,hot
         end)
-        if not ok then state.Destroy();pcall(notify,"GUI stopped: "..tostring(err),"Rivals Skin Changer",8);break end
+        if not ok then
+            -- A transient loading error must not destroy the worker that resumes skins.
+            failureCount=failureCount+1;retryAt=tick()+math.min(3,.25*failureCount);refreshAt=0
+            state.drag=nil;state.resize=nil;state.turnDrag=nil;state.focus=nil
+            state.dirty=true;wasDown=true;wasHot=true
+            pcall(state.ReleaseInput);pcall(showObjects,false)
+            state.status="GUI waiting to recover: "..tostring(err)
+            if failureCount==1 then pcall(notify,"GUI paused during loading; retrying automatically.","Rivals Skin Changer",5) end
+        else
+            if failureCount>0 then state.status="GUI recovered.";mark() end
+            failureCount=0;retryAt=0
+        end
+        end
     end
 end)
 

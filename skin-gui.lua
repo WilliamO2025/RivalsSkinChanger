@@ -2829,7 +2829,7 @@ local function decode64(s)
     return table.concat(out)
 end
 local function getImage(n)
-    if not state.imageCache[n] and not state.imageQueued[n] and (ICON_URLS[n] or ICON_PACKS[n]) then state.imageQueued[n]=true;table.insert(state.imageQueue,n) end
+    if not state.imageQueued[n] and (ICON_URLS[n] or (not state.imageCache[n] and ICON_PACKS[n])) then state.imageQueued[n]=true;table.insert(state.imageQueue,n) end
     return state.imageCache[n]
 end
 local function icon(n,x,y,s,z)
@@ -2845,13 +2845,17 @@ state.imageWorker=task.spawn(function()
         if n then
             local ok,data=pcall(function()
                 if ICON_URLS[n] then
-                    local fetched,bytes=pcall(function() return game:HttpGet(ICON_URLS[n]) end);if fetched and type(bytes)=="string" and bytes:sub(1,4)==string.char(137).."PNG" then return bytes end
+                    local original=ICON_URLS[n]
+                    for _,url in ipairs({original:gsub("/150/150/","/420/420/"),original}) do
+                        local fetched,bytes=pcall(function() return game:HttpGet(url) end)
+                        if fetched and type(bytes)=="string" and bytes:sub(1,4)==string.char(137).."PNG" then return bytes end
+                    end
                 end
                 local pack=ICON_PACKS[n]
                 if pack then
                     if not packs[pack] then
                         local payload=game:GetService("HttpService"):JSONDecode(game:HttpGet(ICON_BASE..pack))
-                        for name,frames in pairs(payload) do if type(frames)=="table" and type(frames[1])=="string" then state.imageCache[name]=decode64(frames[1]) end end
+                        for name,frames in pairs(payload) do if not state.imageCache[name] and type(frames)=="table" and type(frames[1])=="string" then state.imageCache[name]=decode64(frames[1]) end end
                         packs[pack]=true
                     end
                     return state.imageCache[n]
@@ -2915,7 +2919,7 @@ render=function()
         label(page,48,y+9,selected and P.text or P.muted,13)
         hit("nav:"..page,10,y,132,35,function() navigate(page) end)
     end
-    label("CLIENT 2.2",19,h-75,P.faint,10);label((({[161]="Right Shift",[45]="Insert",[117]="F6",[119]="F8"})[SETTINGS.hotkey] or "Hotkey").." to hide",19,h-54,P.muted,10)
+    label("CLIENT 2.3",19,h-75,P.faint,10);label((({[161]="Right Shift",[45]="Insert",[117]="F6",[119]="F8"})[SETTINGS.hotkey] or "Hotkey").." to hide",19,h-54,P.muted,10)
     local left=176;local right=w-292;local cw=right-left-20
     if state.page=="Settings" then
         label("Make it yours",left,66,P.text,26);label("Preferences are saved on this device.",left,101,P.muted,12)
@@ -2951,8 +2955,8 @@ render=function()
             button("save-now","Save preferences now",left+16,354,208,36,function() state.status=state.Save() and "Preferences saved" or "Local storage unavailable";mark() end)
         elseif state.settingsGroup=="About" then
             label("Rivals Skin Changer",left+20,200,P.text,22)
-            label("GUI 2.2  /  Cleanup-aware skin engine",left+20,243,P.muted,13)
-            label("Build: 2026-09-09  /  "..#CATALOG.." weapons",left+20,276,P.muted,13)
+            label("GUI 2.3  /  Cleanup-aware skin engine",left+20,243,P.muted,13)
+            label("Build: 2026-09-10  /  "..#CATALOG.." weapons",left+20,276,P.muted,13)
             label("Catalog: martinikaws.github.io/rivals-skins",left+20,309,P.muted,12)
             label("Preview uses flat artwork. It is not a 3D renderer.",left+20,350,P.faint,12)
         end
@@ -2988,7 +2992,7 @@ render=function()
         local width=ps*math.cos(.65*math.sin(state.previewPhase));local data=getImage(name)
         if data then state.previewItem=draw("Image",cx-width/2,cy-ps/2,{Data=data,Size=Vector2.new(width,ps),Color=P.white,Transparency=1,ZIndex=20});state.previewGeometry={cx=cx,cy=cy,size=ps}
         else label(ICON_URLS[name] and "Loading artwork..." or "Artwork unavailable",right+50,cy,P.faint,12) end
-        hit("rotate-drag",right+14,176,240,math.max(80,h-364),function() state.turnDrag={x=mouse.X,phase=state.previewPhase};state.animate=false end)
+        hit("rotate-drag",right+14,176,240,math.max(80,h-364),function() state.turnDrag={x=mouse.X,phase=state.previewPhase} end)
         local by=h-260
         label(SKIN_RARITY[name] or "Skin preview",right+18,by-18,P.accent,11)
         button("preview-prev","<",right+18,by+8,36,31,function() previewStep(-1) end)
@@ -3034,11 +3038,11 @@ render=function()
         local x,y=w/2-270,h/2-155
         round(x,y,540,310,P.bg,60,10)
         label("Update log",x+22,y+22,P.text,23,63)
-        label("2.2  /  September 9, 2026",x+22,y+65,P.accent,13,63)
-        label("Selected skins reapply after match assets settle.",x+22,y+103,P.muted,12,63)
-        label("Auto apply waits for two seconds of stable assets.",x+22,y+135,P.muted,12,63)
-        label("Transition cleanup guards remain enabled.",x+22,y+167,P.muted,12,63)
-        label("Keep Auto apply on for automatic match resumption.",x+22,y+199,P.muted,12,63)
+        label("2.3  /  September 10, 2026",x+22,y+65,P.accent,13,63)
+        label("Rotate artwork now controls preview motion directly.",x+22,y+103,P.muted,12,63)
+        label("Dragging artwork pauses rotation until release.",x+22,y+135,P.muted,12,63)
+        label("Artwork requests 420px sources with fallback.",x+22,y+167,P.muted,12,63)
+        label("Auto apply cannot restart a cleared Matcha session.",x+22,y+199,P.muted,12,63)
         button("updates-close","Close",x+22,y+249,110,32,function() state.updates=nil;mark() end,false,true)
     end
     if state.confirm then
@@ -3129,7 +3133,7 @@ state.renderer=task.spawn(function()
                 if state.lastStatus~=state.status then if state.status:find("Applied",1,true) then state.successUntil=now+1.2 end;changed() end
                 if state.successUntil and now>=state.successUntil then state.successUntil=nil;mark() end
                 if state.dirty and not state.drag then render() end
-                if state.animate and not SETTINGS.lowPower and not SETTINGS.reduceMotion and not state.drag and not state.resize and not state.dropdown and state.previewItem then
+                if state.animate and not state.turnDrag and not state.drag and not state.resize and not state.dropdown and not state.updates and state.previewItem then
                     state.previewPhase=(state.previewPhase+dt*SETTINGS.rotationSpeed)%(math.pi*2)
                     local g=state.previewGeometry;local width=g.size*math.cos(.65*math.sin(state.previewPhase));local item=state.previewItem
                     item.x=g.cx-width/2;assign(item,"Size",Vector2.new(width*SETTINGS.scale,g.size*SETTINGS.scale));assign(item,"Position",Vector2.new(state.x+item.x*SETTINGS.scale,state.y+(item.y+offsetY)*SETTINGS.scale))

@@ -4773,6 +4773,8 @@ end
 -- show on several tiles at once.
 
 local images, imageQueue, imageWorker = {}, {}, false
+local artworkRevision=0
+local lastInteraction=0
 local imageObjects = {}
 local function cachePath(path) return CACHE .. "/" .. path:gsub("[^%w%-_%.]", "_") .. ".dat" end
 local function loadImage(path)
@@ -4800,11 +4802,17 @@ local function requestImage(path)
         pcall(makefolder, CACHE)
         task.spawn(function()
             while #imageQueue > 0 and _G.__RivalsGuiSession == guiToken do
-                local p = table.remove(imageQueue)
+                -- Yield before any synchronous HTTP/decode work and leave clicks/drags alone.
+                task.wait(.12)
+                if ismouse1pressed() or tick()-lastInteraction < .35 then
+                    task.wait(.25)
+                else
+                local p = table.remove(imageQueue,1)
                 local ok, data = pcall(loadImage, p)
                 images[p].data = ok and data or nil
                 images[p].state = images[p].data and "ok" or "failed"
-                task.wait()
+                artworkRevision=artworkRevision+1
+                end
             end
             imageWorker = false
         end)
@@ -4999,6 +5007,7 @@ local function readInput()
     M.press = down and not M.down
     M.release = M.down and not down
     M.down = down
+    if M.press or M.release or M.down then lastInteraction=tick() end
     if M.press then M.px, M.py, M.dragged = M.x, M.y, false end
     if M.down and (math.abs(M.x - M.px) > 5 or math.abs(M.y - M.py) > 5) then M.dragged = true end
     M.took = false
@@ -5821,10 +5830,10 @@ local DRAW = {Skins = drawSkins, Cosmetics = drawCosmetics, Visuals = drawVisual
     Spoof = drawSpoof, Settings = drawSettings}
 DRAW.Updates = function(x,y,w,h)
     rect(x,y,w,h,C.panel,2,8)
-    text("Update log / 3.0 / September 29, 2026",x+20,y+20,C.text,18,5,true)
-    local entries={"New full GUI with weapon and skin artwork.",
-        "Skin Switch/Swap, wraps, finishers and charms.",
-        "Skyboxes, lighting, sounds, tracers and local spoof controls.",
+    text("Update log / 3.1 / September 29, 2026",x+20,y+20,C.text,18,5,true)
+    local entries={"Idle frames reuse drawings instead of rebuilding the GUI.",
+        "Uncached artwork waits until clicks and drags finish.",
+        "Image downloads are paced; existing cache is retained.",
         "420px skin artwork where supplied; corner resizing.",
         "Bundled engine; guarded memory access during transitions.",
         "Autoexec launcher starts this GUI on each join.",
@@ -5944,6 +5953,7 @@ end
 local OPEN_SECONDS, CLOSE_SECONDS, SLIDE = 0.3, 0.22, 48
 local shown, lastFrame = 0, nil
 
+local lastPaint,paintKey,lastMouseX,lastMouseY = 0,nil,nil,nil
 local function frame()
     readInput()
     if state.accent ~= appliedAccent then appliedAccent = state.accent; applyAccent(state.accent) end
@@ -5958,6 +5968,18 @@ local function frame()
     if state.open then shown = math.min(1, shown + dt / OPEN_SECONDS)
     else shown = math.max(0, shown - dt / CLOSE_SECONDS) end
 
+    local signature=table.concat({tostring(state.tab),tostring(state.skinsView),tostring(state.weapon),
+        tostring(state.open),tostring(state.status),tostring(state.dirty),tostring(artworkRevision)},"|")
+    local keyboard=focus~=nil or state.binding
+    if not keyboard then
+        for _,vk in ipairs({0x21,0x22,0x25,0x26,0x27,0x28,0x1B}) do
+            if iskeypressed(vk) then keyboard=true;break end
+        end
+    end
+    local redraw=signature~=paintKey or M.press or M.release or M.down or keyboard
+        or M.x~=lastMouseX or M.y~=lastMouseY or (shown>0 and shown<1) or now-lastPaint>=.25
+    if not redraw then return end
+    lastPaint,paintKey,lastMouseX,lastMouseY=now,signature,M.x,M.y
     beginFrame()
     local overWindow = false
     if shown > 0 then
@@ -6045,7 +6067,7 @@ task.spawn(function()
             print("[Rivals GUI] " .. lastError)
         end
         if state.unload then break end
-        task.wait()
+        task.wait(.016)
     end
     stop()
 end)

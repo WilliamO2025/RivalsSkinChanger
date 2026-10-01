@@ -1,4 +1,4 @@
-# Rivals Skin Changer 3.0
+# Rivals Skin Changer 3.4
 
 Hybrid of Martini's FULLMATCHA GUI/engine and our loader improvements. Open with:
 
@@ -37,3 +37,12 @@ Re-equip for skins/wraps; respawn for some skin effects; charms appear on next e
 Syntax and isolated mocks passed for all eight pages, Default, title controls, resize, autoapply once per server, rerun cleanup, launcher game filtering/timeout/offline handling and guarded memory access. The live Roblox engine, cosmetics and performance still require in-game testing. Do not treat mock passes as proof that every skin works.
 
 See UPSTREAM.md for source revision and credits.
+
+## September 30 — upstream 3.4
+Merged FULLMATCHA b938e2bff671bc3ade20953ad42b596f05c05ebe and reviewed MATCHA e6a34b99566909c2deb08f5e47492dca9160255c. Adds new Roblox layout offsets, persisted undo records, No Hands, a combined Misc tab, owned-item filtering, conflicting-swap checks, Energy Pistols tracers and the first-run notice. Our idle redraw reductions, paced artwork, corner resizing and bundled-engine session guards remain.
+
+Upstream support code: a short identifier is derived locally from Matcha's hardware ID and shown in logs/settings. The engine downloads the author's rsc-refs blocklist and stops for listed identifiers. The hardware ID is not sent in that HTTP request. We retained this upstream behavior; our notice does not claim undetectability.
+
+The updated autoexec launcher sets the upstream startup flag. After acknowledging the first-run notice, the GUI defaults to hidden on autoexec; Right Shift opens it. Settings > Window on autoexec changes that behavior.
+
+Validation: Lua syntax, first-run acknowledgement, new Misc pages, No Hands config round-trip, owned-only filtering/fallback, GUI controls, once-per-server apply, performance regressions, launcher timeout/filtering and memory guards passed in isolated mocks. Live Roblox compatibility and performance remain unverified.

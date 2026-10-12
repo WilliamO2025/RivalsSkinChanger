@@ -1,4 +1,4 @@
--- Rivals Skin Changer 3.5; upstream Martini; see UPSTREAM.md for credits.
+-- Rivals Skin Changer 3.5.1; upstream Martini; see UPSTREAM.md for credits.
 
 -- Upgrade from our 2.x GUI. Only our own state and preferences are consulted.
 local old = _G.__RIVALS_SKIN_GUI
@@ -1949,6 +1949,7 @@ local function walkNodes(base, maxNodes, wanted)
     local found, n, readable, want = {}, 0, 0, 0
     for _ in pairs(wanted) do want = want + 1 end
     for i = 0, maxNodes - 1 do
+        if i > 0 and i % 128 == 0 then task.wait() end
         local node = base + i * NODE_SIZE
         local k = nodeKey(node)
         if k then
@@ -1995,6 +1996,7 @@ local function walkAround(center, span, wanted)
     end
     visit(center)
     for i = 1, span do
+        if i % 128 == 0 then task.wait() end
         visit(center + i * NODE_SIZE)
         visit(center - i * NODE_SIZE)
     end
@@ -2092,6 +2094,7 @@ ROUTE.detect = function(ms)
     if full then ROUTE.nextFull = tick() + 10 end
     for pass = 1, full and 2 or 1 do
         for _, x in ipairs(xs) do
+            task.wait()
             local g = rd(thread + x)
             if g and g > 0x10000 and g < 0x7fffffffffff then
                 if pass == 1 then trace.pointers = trace.pointers + 1 end
@@ -2099,6 +2102,7 @@ ROUTE.detect = function(ms)
                     if tryAt(g, x, ROUTE.registry) then return true end
                 else
                     for y = 0, 0x1000, 8 do
+                        if y > 0 and y % 256 == 0 then task.wait() end
                         if tryAt(g, x, y) then return true end
                     end
                 end
@@ -5250,7 +5254,7 @@ local function upstreamBusy()
     return type(stamp) == "number" and tick() - stamp < 180
 end
 local function changerSource()
-    return BUNDLED_ENGINE, "bundled 3.5"
+    return BUNDLED_ENGINE, "bundled 3.5.1"
 end
 local function apply()
     local context = currentContext()
@@ -6545,8 +6549,8 @@ local DRAW = {Skins = drawSkins, Cosmetics = drawCosmetics, Visuals = drawVisual
     Settings = drawSettings}
 DRAW.Updates = function(x,y,w,h)
     rect(x,y,w,h,C.panel,2,8)
-    text("Update log / 3.5 / October 12, 2026",x+20,y+20,C.text,18,5,true)
-    local entries={"Automatic Roblox memory-layout detection and fallback.",
+    text("Update log / 3.5.1 / October 12, 2026",x+20,y+20,C.text,18,5,true)
+    local entries={"Yielding memory scans keep the GUI responsive while loading.",
         "Updated inventory, sounds and tracer compatibility.",
         "Unavailable community skies disabled to prevent crashes.",
         "420px skin artwork where supplied; corner resizing.",
@@ -6728,12 +6732,21 @@ local shown, lastFrame = 0, nil
 
 local lastPaint,paintKey,lastMouseX,lastMouseY = 0,nil,nil,nil
 local function frame()
-    readInput()
     if state.accent ~= appliedAccent then appliedAccent = state.accent; applyAccent(state.accent) end
     if state.binding then
         captureKey()
     elseif keyHit(state.toggleKey) then
         state.open = not state.open; focus = nil
+    end
+    local grab = state.open and (not isrbxactive or isrbxactive() ~= false)
+    if grab ~= lastInputGrab and type(setrobloxinput) == "function" then
+        local ok = pcall(setrobloxinput, not grab)
+        if ok then lastInputGrab = grab end
+    end
+    local okInput = pcall(readInput)
+    if not okInput then
+        M.x, M.y = -1, -1
+        M.down, M.press, M.release, M.dragged, M.took = false, false, false, false, false
     end
     local now = tick()
     local dt = math.min(0.05, now - (lastFrame or now))
@@ -6742,7 +6755,7 @@ local function frame()
     else shown = math.max(0, shown - dt / CLOSE_SECONDS) end
 
     local signature=table.concat({tostring(state.tab),tostring(state.skinsView),tostring(state.weapon),
-        tostring(state.open),tostring(state.status),tostring(state.dirty),tostring(artworkRevision)},"|")
+        tostring(state.open),tostring(shown),tostring(state.status),tostring(state.dirty),tostring(artworkRevision)},"|")
     local keyboard=focus~=nil or state.binding
     if not keyboard then
         for _,vk in ipairs({0x21,0x22,0x25,0x26,0x27,0x28,0x1B}) do
@@ -6768,11 +6781,7 @@ local function frame()
     end
     endFrame()
     -- Keep clicks and typing on the window from reaching the game.
-    local grab = state.open and (not isrbxactive or isrbxactive() ~= false)
-    if grab ~= lastInputGrab and type(setrobloxinput) == "function" then
-        lastInputGrab = grab
-        pcall(setrobloxinput, not grab)
-    end
+
 end
 
 local alive = true

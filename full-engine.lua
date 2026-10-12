@@ -1921,6 +1921,7 @@ local function walkNodes(base, maxNodes, wanted)
     local found, n, readable, want = {}, 0, 0, 0
     for _ in pairs(wanted) do want = want + 1 end
     for i = 0, maxNodes - 1 do
+        if i > 0 and i % 128 == 0 then task.wait() end
         local node = base + i * NODE_SIZE
         local k = nodeKey(node)
         if k then
@@ -1967,6 +1968,7 @@ local function walkAround(center, span, wanted)
     end
     visit(center)
     for i = 1, span do
+        if i % 128 == 0 then task.wait() end
         visit(center + i * NODE_SIZE)
         visit(center - i * NODE_SIZE)
     end
@@ -2064,6 +2066,7 @@ ROUTE.detect = function(ms)
     if full then ROUTE.nextFull = tick() + 10 end
     for pass = 1, full and 2 or 1 do
         for _, x in ipairs(xs) do
+            task.wait()
             local g = rd(thread + x)
             if g and g > 0x10000 and g < 0x7fffffffffff then
                 if pass == 1 then trace.pointers = trace.pointers + 1 end
@@ -2071,6 +2074,7 @@ ROUTE.detect = function(ms)
                     if tryAt(g, x, ROUTE.registry) then return true end
                 else
                     for y = 0, 0x1000, 8 do
+                        if y > 0 and y % 256 == 0 then task.wait() end
                         if tryAt(g, x, y) then return true end
                     end
                 end

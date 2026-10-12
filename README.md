@@ -1,4 +1,4 @@
-# Rivals Skin Changer 3.5
+# Rivals Skin Changer 3.5.1
 
 Hybrid of Martini's FULLMATCHA GUI/engine and our loader improvements. Open with:
 
@@ -51,3 +51,8 @@ Validation: Lua syntax, first-run acknowledgement, new Misc pages, No Hands conf
 Merged the supplied engine and GUI in full: runtime Roblox memory-layout detection with fallback, updated inventory and sound lookups, and tracer support for additional layouts. Upstream disables community sky presets reported to crash on map loads; built-in game skies remain available. Existing saved presets are also checked by the engine before applying.
 
 Retained our GUI performance improvements, HD artwork fallback, corner resizing, update log, session guards and autoexec loader. The installed launcher automatically fetches this bundle on the next join; no launcher reinstall is needed.
+
+## October 12 — GUI recovery fix 3.5.1
+Hotkey polling now precedes mouse input and drawing. Hiding releases game input before rendering, failed input-capture calls retry, and a failed mouse poll cannot prevent the show/hide toggle. The final animation frame always renders. Regression checks inject mouse and drawing errors after a mocked skin apply; live Matcha behavior still needs confirmation.
+
+Loading responsiveness: long read-only table, nearby-node and layout searches now yield between batches so the GUI scheduler can poll the hotkey. Memory writes are unchanged, and reads revalidate the session after yielding. Synchronous host HTTP/image decoding may still pause input while that single call completes.

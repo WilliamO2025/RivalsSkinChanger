@@ -1,4 +1,4 @@
--- Rivals Skin Changer 3.4; upstream Martini; see UPSTREAM.md for credits.
+-- Rivals Skin Changer 3.5; upstream Martini; see UPSTREAM.md for credits.
 
 -- Upgrade from our 2.x GUI. Only our own state and preferences are consulted.
 local old = _G.__RIVALS_SKIN_GUI
@@ -1934,11 +1934,13 @@ local function nodeKey(node)
     if ok and type(str) == "string" and #str > 0 and #str < 80 then return str end
 end
 
--- 2^lsizenode (byte +6) is the real node count; walking past it reads other
--- tables' nodes and can match a foreign entry with the same key.
+-- 2^lsizenode is the real node count; walking past it reads other tables'
+-- nodes and can match a foreign entry with the same key. Which header byte
+-- holds it depends on the Roblox build (found by the registry route below).
 local function nodeCount(t)
     if not t or t < 0x10000 then return nil end
-    local ok, l = pcall(mrd, "byte", t + 4)
+    local layout = _G.__RSC_LAYOUT
+    local ok, l = pcall(mrd, "byte", t + (layout and layout.lsize or 4))
     if not ok or not l or l < 0 or l > 20 then return nil end
     return 2 ^ l
 end
@@ -2000,24 +2002,124 @@ local function walkAround(center, span, wanted)
 end
 
 -- Registry route
--- Roblox build 02c37bc (Sep 30 2026): the type byte of a Luau object is
--- byte 1 of its header (was 0), a table's lsizenode is byte 4 (was 6), and
--- the thread's global state is at +0x68 (was +0x18).
-local ROUTE = {thread = 0x170, slot = 0x178, globalState = 0x68, registry = 0x620, node = 0x18, array = 0x20}
-local GC_TT = 1
+-- Roblox reshuffles Luau's object layout between builds: which header byte
+-- holds an object's type (tt), which holds a table's lsizenode, and where a
+-- thread keeps its global state. Build 02c37bc (Sep 30 2026) had tt +1,
+-- lsizenode +4, global state +0x68; cec3ad5 (Oct 2026) moved tt back to +0.
+-- So they are found at runtime (ROUTE.detect) instead of being hard-coded.
+local ROUTE = {thread = 0x170, slot = 0x178, globalState = 0x68, registry = 0x620, node = 0x18, array = 0x20,
+    sizearray = 8, tt = 1, lsize = 4}
 local TAG_TABLE, TAG_THREAD = 7, 10
 
 local function rbyte(a) local ok, v = pcall(mrd, "byte", a) return ok and v or nil end
 local function rint(a) local ok, v = pcall(mrd, "int", a) return ok and v or nil end
 
+-- Finds tt, the global-state offset, the registry offset and lsizenode from
+-- one module: its thread's header says where tt is; the right global state
+-- leads to a registry whose slot for this module holds a table.
+ROUTE.detect = function(ms)
+    -- What was seen, for the debug copy ("why did detection fail").
+    local trace = {}
+    _G.__RSC_ROUTE_TRACE = trace
+    local thread = rd(ms.Address + ROUTE.thread)
+    local slot = rint(ms.Address + ROUTE.slot)
+    if not thread or thread < 0x10000 or not slot or slot < 1 then trace.stop = "no thread/slot on the module" return false end
+    local tt
+    for b = 0, 3 do if rbyte(thread + b) == TAG_THREAD then tt = b break end end
+    if not tt then trace.stop = "no thread tag in the thread header" return false end
+    trace.tt, trace.slot, trace.pointers, trace.tagged, trace.arrays = tt, slot, 0, 0, 0
+    -- A table's array: a size and a pointer somewhere in its first 0x30
+    -- bytes; the right pair has a table TValue (tag at +12) in this slot.
+    local function arrayOf(reg)
+        for _, so in ipairs({ROUTE.sizearray or 8, 8, 12, 4}) do
+            local size = rint(reg + so)
+            if size and size >= slot and size < 10000000 then
+                for _, ao in ipairs({ROUTE.array, 0x20, 0x18, 0x28, 0x10}) do
+                    local arr = rd(reg + ao)
+                    if arr and arr > 0x10000 and arr < 0x7fffffffffff and rint(arr + (slot - 1) * 16 + 12) == TAG_TABLE then
+                        local t = rd(arr + (slot - 1) * 16)
+                        if t and t > 0x10000 and rbyte(t + tt) == TAG_TABLE then return t, so, ao end
+                    end
+                end
+            end
+        end
+    end
+    -- A table's nodes: a pointer and a size byte (followed by its mask)
+    -- that lead to string keys.
+    local function nodesOfTable(t)
+        for _, no in ipairs({ROUTE.node, 0x18, 0x20, 0x10, 0x28}) do
+            local base = rd(t + no)
+            if base and base > 0x10000 and base < 0x7fffffffffff then
+                for _, b in ipairs({tt == 0 and 6 or 4, 4, 6, 5, 7, 3, 2}) do
+                    local l, m = rbyte(t + b), rbyte(t + b + 1)
+                    if l and m and l >= 1 and l <= 24 and m == (2 ^ l - 1) % 256 then
+                        local keys = 0
+                        for i = 0, math.min(2 ^ l, 64) - 1 do
+                            local n = base + i * 32
+                            local kp = rd(n + 16)
+                            if (rint(n + 28) or 0) % 16 == 6 and kp and kp > 0x10000 then
+                                local ok, k = pcall(mrd, "string", kp + 24)
+                                if ok and type(k) == "string" and #k > 0 and #k < 64 then keys = keys + 1 end
+                            end
+                        end
+                        if keys > 0 then return no, b end
+                    end
+                end
+            end
+        end
+    end
+    local function tryAt(g, x, y)
+        local reg = rd(g + y)
+        if not reg or reg < 0x10000 or rint(g + y + 12) ~= TAG_TABLE or rbyte(reg + tt) ~= TAG_TABLE then return false end
+        trace.tagged = trace.tagged + 1
+        local t, so, ao = arrayOf(reg)
+        if not t then return false end
+        trace.arrays = trace.arrays + 1
+        local no, lsize = nodesOfTable(t)
+        if not no then trace.stop = "module table found but its nodes weren't" return false end
+        ROUTE.tt, ROUTE.globalState, ROUTE.registry, ROUTE.lsize = tt, x, y, lsize
+        ROUTE.sizearray, ROUTE.array, ROUTE.node, ROUTE.ok = so, ao, no, true
+        _G.__RSC_LAYOUT = {tt = tt, globalState = x, registry = y, lsize = lsize, sizearray = so, array = ao, node = no}
+        print(string.format("[RivalsSkinChanger] Memory layout: type byte +%d, global state +0x%x, registry +0x%x, size byte +%d, array +0x%x/+%d, nodes +0x%x",
+            tt, x, y, lsize, ao, so, no))
+        return true
+    end
+    local xs = {ROUTE.globalState, 0x18, 0x68}
+    for x = 0, 0x100, 8 do xs[#xs + 1] = x end
+    -- The registry has sat at +0x620 for a long time: try that first, and
+    -- the whole global state only now and then (it is a few thousand reads).
+    local full = not ROUTE.nextFull or tick() >= ROUTE.nextFull
+    if full then ROUTE.nextFull = tick() + 10 end
+    for pass = 1, full and 2 or 1 do
+        for _, x in ipairs(xs) do
+            local g = rd(thread + x)
+            if g and g > 0x10000 and g < 0x7fffffffffff then
+                if pass == 1 then trace.pointers = trace.pointers + 1 end
+                if pass == 1 then
+                    if tryAt(g, x, ROUTE.registry) then return true end
+                else
+                    for y = 0, 0x1000, 8 do
+                        if tryAt(g, x, y) then return true end
+                    end
+                end
+            end
+        end
+    end
+    trace.stop = trace.stop or (trace.arrays > 0 and "registry found, module slot not usable"
+        or (trace.tagged > 0 and "registry-like tables found, but none held this module" or "no registry found"))
+    return false
+end
+
 local function moduleTable(ms)
     if not ms or not ms.Address then return nil end
+    if not ROUTE.ok then ROUTE.detect(ms) end
+    local GC_TT = ROUTE.tt
     local thread = rd(ms.Address + ROUTE.thread)
     if not thread or thread < 0x10000 or rbyte(thread + GC_TT) ~= TAG_THREAD then return nil end
     local g = rd(thread + ROUTE.globalState)
     local reg = g and g > 0x10000 and rd(g + ROUTE.registry)
     if not reg or reg < 0x10000 or rbyte(reg + GC_TT) ~= TAG_TABLE or rint(g + ROUTE.registry + 12) ~= TAG_TABLE then return nil end
-    local slot, size, arr = rint(ms.Address + ROUTE.slot), rint(reg + 8), rd(reg + ROUTE.array)
+    local slot, size, arr = rint(ms.Address + ROUTE.slot), rint(reg + ROUTE.sizearray), rd(reg + ROUTE.array)
     if not slot or not size or not arr or slot < 1 or slot > size then return nil end
     local t = rd(arr + (slot - 1) * 16)
     if not t or t < 0x10000 or rbyte(t + GC_TT) ~= TAG_TABLE then return nil end
@@ -2025,7 +2127,7 @@ local function moduleTable(ms)
 end
 
 local function nodesOf(t, maxNodes, wanted)
-    local base = t and t > 0x10000 and rbyte(t + GC_TT) == TAG_TABLE and rd(t + ROUTE.node)
+    local base = t and t > 0x10000 and rbyte(t + ROUTE.tt) == TAG_TABLE and rd(t + ROUTE.node)
     if not base or base < 0x10000 then return nil end
     local count = math.min(maxNodes, nodeCount(t) or maxNodes)
     local found, n = walkNodes(base, count, wanted)
@@ -2583,6 +2685,14 @@ do
             told = true
             print("[RivalsSkinChanger] Waiting for the game to finish loading...")
         end
+        -- The tables load within seconds; if the route itself still can't be
+        -- worked out after 8, waiting longer won't help.
+        if not ROUTE.ok and tick() - t0 > 8 then
+            local tr = _G.__RSC_ROUTE_TRACE or {}
+            print("[RivalsSkinChanger] Couldn't read this Roblox build's memory layout (" .. tostring(tr.stop)
+                .. ") - going ahead with the slower lookup")
+            break
+        end
         task.wait(0.5)
         if game.JobId ~= job then
             print("[RivalsSkinChanger] Server changed while waiting - stopped")
@@ -2947,6 +3057,19 @@ local function applySkybox(conf)
     local gray = preset and tostring(preset):lower() == "gray"
     if type(setfflag) == "function" then pcall(setfflag, "DebugSkyGray", gray and 1 or 0) end
     if gray then return 0, "gray sky on - shows straight away" end
+    -- Since Roblox build cec3ad5 (Oct 2026) a sky whose images Rivals isn't
+    -- allowed to load crashes the game on the next map load. New uploads are
+    -- private to their owner, so the community skies (uploaded by Martinikaws
+    -- in 2026) crash; the older public images Rivals can load still work.
+    -- Only those presets are applied until the uploads are made public.
+    do
+        local PUBLIC = {blue = true, station = true, graveyard = true, ["sudden death"] = true, space = true,
+            westown = true, black = true, classic = true}
+        if preset and not PUBLIC[tostring(preset):lower()] then
+            return 0, "the '" .. tostring(preset) .. "' sky can't load in Rivals right now (its images aren't public) and would crash the game - "
+                .. "these work: Blue, Station, Graveyard, Sudden Death, Space, Westown, Black, Classic"
+        end
+    end
     if preset then
         local p = SKYBOX_PRESETS[tostring(preset):lower()]
         if not p then return 0, "unknown skybox preset '" .. tostring(preset) .. "'" end
@@ -3045,7 +3168,7 @@ local function writeLuaString(ts, text)
 end
 
 local function collectSoundStrings(out, tbl, depth)
-    local size, arr = rint(tbl + 8), rd(tbl + ROUTE.array)
+    local size, arr = rint(tbl + ROUTE.sizearray), rd(tbl + ROUTE.array)
     if not size or not arr or size < 1 or size > 256 or arr < 0x10000 then return end
     for i = 0, size - 1 do
         local v = arr + i * 16
@@ -4059,10 +4182,23 @@ do
         local f = nodesOf(te, 1024, {Play = true})
         local cl = f and f.Play and rd(f.Play)
         local proto = cl and cl > 0x10000 and rd(cl + 0x18)
-        local arr = proto and proto > 0x10000 and rd(proto + 0x28)
-        local child = arr and arr > 0x10000 and rd(arr)
-        local k = child and child > 0x10000 and rd(child + 0x48)
-        if not k or k < 0x10000 then return nil end
+        local function constantsVia(protosOff, constOff, skip)
+            local b = proto and proto > 0x10000 and (skip and rd(proto + skip) or proto)
+            local arr = b and b > 0x10000 and rd(b + protosOff)
+            local child = arr and arr > 0x10000 and rd(arr)
+            local d = child and child > 0x10000 and (skip and rd(child + skip) or child)
+            local k = d and d > 0x10000 and rd(d + constOff)
+            if not k or k < 0x10000 then return nil end
+            -- Only a list that holds the speed (800, or an earlier run's value).
+            for i = 0, 63 do
+                local okV, v = pcall(mrd, "double", k + i * 16)
+                if okV and isNumber(k + i * 16) and (v == 800 or (v / 8 >= 5 and v / 8 <= 300 and (v / 8) % 5 == 0)) then return k end
+            end
+            return nil
+        end
+        -- Proto layouts: build cec3ad5, then 02c37bc, then the older one.
+        local k = constantsVia(0x48, 0x20) or constantsVia(0x28, 0x48) or constantsVia(0x20, 0x38, 8)
+        if not k then return nil end
         -- 800, or what an earlier run set it to (800 x a multiple of 5%)
         local fallbackSlot
         for i = 0, 63 do
@@ -4454,7 +4590,6 @@ end
 _G.__RIVALS_SKIN_CHANGER_STATE = {restores = memoryRestores, wfAddr = wf.Address, jobId = game.JobId, nameCopies = nameCopies, dicts = dictCache, floats = floatRestores}
 saveUndo()
 _G.__RIVALS_SKIN_CHANGER_BUSY = nil
-
 ]====]
 -- Rivals changer GUI, drawn on screen
 -- Edits rivals_config.lua and runs the skin changer, in a window of its own
@@ -4528,15 +4663,11 @@ local function numbered(prefix, from, to)
     for n = from, to do out[#out + 1] = string.format("%s %02d", prefix, n) end
     return out
 end
+-- Community skies are off: their images are private uploads that Rivals
+-- isn't allowed to load, and since Roblox build cec3ad5 (Oct 2026) that
+-- crashes the game. Only skies with public images (the game's own) remain.
 local SKY_GROUPS = {
     {name = "Game skies", skies = {"blue", "space", "graveyard", "sudden death", "station", "westown", "black", "gray", "classic"}},
-    {name = "Cloudy", skies = numbered("cloudy", 1, 25)},
-    {name = "Space", skies = {"galaxy", "blue nebula", "gold nebula"}},
-    {name = "More A-D", skies = {"aurora", "beautiful", "black hole", "blue sky", "broken sky", "castle grounds", "chill gray", "chill pink", "chroma key", "clear skies", "cyan", "dead star forest", "disaster"}},
-    {name = "More E-M", skies = {"elegant morning", "emo", "fade blue", "forest", "goodnight", "grimnight", "hades", "hazy", "jungle", "light blue", "light pink", "minecraft", "minecraft end"}},
-    {name = "More M-P", skies = {"moonlight", "neon sky", "neon sky 2", "nibiru", "night", "night sky moon", "northern lights", "oblivion", "orange", "overcast", "pandora", "peaceful morning", "pink sunrise"}},
-    {name = "More P-S", skies = {"pumpkin hill", "purple nebula", "red", "setting sun", "sfoth", "shiverfrost", "sky 05", "sky 13", "sky 2006", "sky 22", "sky 31", "sky 38", "sky 47"}},
-    {name = "More S-Z", skies = {"sky purple", "sky sunset", "space blue", "spooky", "sunny sky", "universe", "utter east", "whomp fortress", "winterness", "xen", "zen end"}},
 }
 -- Front faces of the game's own skies; the uploaded ones come from skyboxes.json.
 local SKY_FACES = {
@@ -4900,17 +5031,33 @@ do
     local function rd(a) local ok, v = pcall(mrd, "uintptr_t", a) return ok and v or nil end
     local function rint(a) local ok, v = pcall(mrd, "int", a) return ok and v or nil end
     local function rbyte(a) local ok, v = pcall(mrd, "byte", a) return ok and v or nil end
-    -- Roblox build 02c37bc (Sep 30 2026): an object's type is byte 1 of its
-    -- header, a table's lsizenode byte 4, and a thread's global state +0x68.
+    -- Roblox moves Luau's layout between builds: the header byte with an
+    -- object's type (+1 in build 02c37bc, +0 in cec3ad5), the one with a
+    -- table's lsizenode, and the thread's global state. The changer finds
+    -- them and shares them as _G.__RSC_LAYOUT; until it has, this checks
+    -- the thread's header and the known global-state offsets itself.
     local TAG_TABLE, TAG_THREAD = 7, 10
-    local function isTable(t) return t and t > 0x10000 and rbyte(t + 1) == TAG_TABLE end
+    -- Known builds: 02c37bc (type byte +1) and cec3ad5 (type byte +0).
+    local KNOWN = {[1] = {tt = 1, globalState = 0x68, registry = 0x620, lsize = 4, sizearray = 8, array = 0x20, node = 0x18},
+        [0] = {tt = 0, globalState = 0x18, registry = 0x620, lsize = 5, sizearray = 8, array = 0x18, node = 0x10}}
+    local L = KNOWN[1]
+    local function isTable(t) return t and t > 0x10000 and rbyte(t + L.tt) == TAG_TABLE end
     local function moduleTable(ms)
         local thread = ms and ms.Address and rd(ms.Address + 0x170)
-        if not thread or thread < 0x10000 or rbyte(thread + 1) ~= TAG_THREAD then return nil end
-        local g = rd(thread + 0x68)
-        local reg = g and g > 0x10000 and rd(g + 0x620)
+        if not thread or thread < 0x10000 then return nil end
+        local shared = _G.__RSC_LAYOUT
+        if shared and shared.array then
+            L = shared
+        elseif rbyte(thread + L.tt) ~= TAG_THREAD then
+            for b = 0, 3 do
+                if rbyte(thread + b) == TAG_THREAD and KNOWN[b] then L = KNOWN[b] break end
+            end
+        end
+        if rbyte(thread + L.tt) ~= TAG_THREAD then return nil end
+        local g = rd(thread + L.globalState)
+        local reg = g and g > 0x10000 and rd(g + L.registry)
         if not isTable(reg) then return nil end
-        local slot, size, arr = rint(ms.Address + 0x178), rint(reg + 8), rd(reg + 0x20)
+        local slot, size, arr = rint(ms.Address + 0x178), rint(reg + L.sizearray), rd(reg + L.array)
         if not slot or not size or not arr or slot < 1 or slot > size then return nil end
         local t = rd(arr + (slot - 1) * 16)
         return isTable(t) and t or nil
@@ -4919,7 +5066,7 @@ do
     local function fields(t)
         local out = {}
         if not isTable(t) then return out end
-        local base, l = rd(t + 0x18), rbyte(t + 4)
+        local base, l = rd(t + L.node), rbyte(t + L.lsize)
         if not base or base < 0x10000 or not l or l > 16 then return out end
         for i = 0, 2 ^ l - 1 do
             local node = base + i * 32
@@ -5103,7 +5250,7 @@ local function upstreamBusy()
     return type(stamp) == "number" and tick() - stamp < 180
 end
 local function changerSource()
-    return BUNDLED_ENGINE, "bundled 3.4"
+    return BUNDLED_ENGINE, "bundled 3.5"
 end
 local function apply()
     local context = currentContext()
@@ -5167,20 +5314,28 @@ local function equipSoundStrings()
     local modules = game:GetService("ReplicatedStorage"):FindFirstChild("Modules")
     local ms = modules and modules:FindFirstChild("SoundLibrary")
     local thread = ms and rdq(ms.Address + 0x170)
-    local g = thread and rdq(thread + 0x68)
-    local reg = g and rdq(g + 0x620)
-    local slot, arr = ms and rdi(ms.Address + 0x178), reg and rdq(reg + 0x20)
+    -- The layout the changer found; without it, one of the two known builds,
+    -- told apart by where the thread's type byte (10) sits.
+    local lay = _G.__RSC_LAYOUT
+    if not lay or not lay.array then
+        local okB, b0 = pcall(memory_read, "byte", thread or 0)
+        lay = (okB and b0 == 10) and {globalState = 0x18, registry = 0x620, lsize = 5, sizearray = 8, array = 0x18, node = 0x10}
+            or {globalState = 0x68, registry = 0x620, lsize = 4, sizearray = 8, array = 0x20, node = 0x18}
+    end
+    local g = thread and rdq(thread + lay.globalState)
+    local reg = g and rdq(g + lay.registry)
+    local slot, arr = ms and rdi(ms.Address + 0x178), reg and rdq(reg + lay.array)
     local t = arr and slot and slot > 0 and rdq(arr + (slot - 1) * 16)
     if not t then return {} end
-    local base = rdq(t + 0x18)
-    local okL, l = pcall(memory_read, "byte", t + 4)
+    local base = rdq(t + lay.node)
+    local okL, l = pcall(memory_read, "byte", t + lay.lsize)
     if not base or not okL or l > 12 then return {} end
     for i = 0, 2 ^ l - 1 do
         local node = base + i * 32
         local key = rdq(node + 16)
         if key and readLuaString(key) == "EquipSounds" then
             local list = rdq(node)
-            local size, items = list and rdi(list + 8), list and rdq(list + 0x20)
+            local size, items = list and rdi(list + lay.sizearray), list and rdq(list + lay.array)
             local out = {}
             for j = 0, (size or 0) - 1 do
                 local ts = rdq(items + j * 16)
@@ -6390,14 +6545,14 @@ local DRAW = {Skins = drawSkins, Cosmetics = drawCosmetics, Visuals = drawVisual
     Settings = drawSettings}
 DRAW.Updates = function(x,y,w,h)
     rect(x,y,w,h,C.panel,2,8)
-    text("Update log / 3.4 / September 30, 2026",x+20,y+20,C.text,18,5,true)
-    local entries={"Updated Roblox memory layout and restoration fixes.",
-        "Owned-only filtering and conflicting-swap warnings.",
-        "Misc: No Hands, tracers, Energy Pistols and spoof.",
+    text("Update log / 3.5 / October 12, 2026",x+20,y+20,C.text,18,5,true)
+    local entries={"Automatic Roblox memory-layout detection and fallback.",
+        "Updated inventory, sounds and tracer compatibility.",
+        "Unavailable community skies disabled to prevent crashes.",
         "420px skin artwork where supplied; corner resizing.",
         "Bundled engine; guarded memory access during transitions.",
         "Autoexec settings and first-run notice from upstream.",
-        "Autoexec installation is manual; no Matcha files were changed."}
+        "Existing autoexec launcher loads this update on next join."}
     for i,lineText in ipairs(entries) do text(lineText,x+20,y+62+i*29,C.dim,13,5) end
 end
 local function viewport()

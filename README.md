@@ -1,4 +1,4 @@
-# Rivals Skin Changer 3.4
+# Rivals Skin Changer 3.5
 
 Hybrid of Martini's FULLMATCHA GUI/engine and our loader improvements. Open with:
 
@@ -38,7 +38,7 @@ Syntax and isolated mocks passed for all eight pages, Default, title controls, r
 
 See UPSTREAM.md for source revision and credits.
 
-## September 30 — upstream 3.4
+## September 30 â€” upstream 3.4
 Merged FULLMATCHA b938e2bff671bc3ade20953ad42b596f05c05ebe and reviewed MATCHA e6a34b99566909c2deb08f5e47492dca9160255c. Adds new Roblox layout offsets, persisted undo records, No Hands, a combined Misc tab, owned-item filtering, conflicting-swap checks, Energy Pistols tracers and the first-run notice. Our idle redraw reductions, paced artwork, corner resizing and bundled-engine session guards remain.
 
 Upstream support code: a short identifier is derived locally from Matcha's hardware ID and shown in logs/settings. The engine downloads the author's rsc-refs blocklist and stops for listed identifiers. The hardware ID is not sent in that HTTP request. We retained this upstream behavior; our notice does not claim undetectability.
@@ -46,3 +46,8 @@ Upstream support code: a short identifier is derived locally from Matcha's hardw
 The updated autoexec launcher sets the upstream startup flag. After acknowledging the first-run notice, the GUI defaults to hidden on autoexec; Right Shift opens it. Settings > Window on autoexec changes that behavior.
 
 Validation: Lua syntax, first-run acknowledgement, new Misc pages, No Hands config round-trip, owned-only filtering/fallback, GUI controls, once-per-server apply, performance regressions, launcher timeout/filtering and memory guards passed in isolated mocks. Live Roblox compatibility and performance remain unverified.
+## October 12 — compatibility update 3.5
+
+Merged the supplied engine and GUI in full: runtime Roblox memory-layout detection with fallback, updated inventory and sound lookups, and tracer support for additional layouts. Upstream disables community sky presets reported to crash on map loads; built-in game skies remain available. Existing saved presets are also checked by the engine before applying.
+
+Retained our GUI performance improvements, HD artwork fallback, corner resizing, update log, session guards and autoexec loader. The installed launcher automatically fetches this bundle on the next join; no launcher reinstall is needed.

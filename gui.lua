@@ -1,4 +1,4 @@
--- Rivals Skin Changer 3.5.3; upstream Martini; see UPSTREAM.md for credits.
+-- Rivals Skin Changer 3.5.4; upstream Martini; see UPSTREAM.md for credits.
 
 -- Upgrade from our 2.x GUI. Only our own state and preferences are consulted.
 local old = _G.__RIVALS_SKIN_GUI
@@ -5270,7 +5270,7 @@ local function upstreamBusy()
     return type(stamp) == "number" and tick() - stamp < 180
 end
 local function changerSource()
-    return BUNDLED_ENGINE, "bundled 3.5.3"
+    return BUNDLED_ENGINE, "bundled 3.5.4"
 end
 local compiledChanger
 local function apply()
@@ -5424,8 +5424,8 @@ local function loadImage(path)
 end
 local function requestImage(path)
     local e = images[path]
-    if e then return e end
-    e = {state = "queued"}
+    if e then e.lastWanted = tick(); return e end
+    e = {state = "queued", lastWanted = tick()}
     images[path] = e
     imageQueue[#imageQueue + 1] = path
     if not imageWorker then
@@ -5439,9 +5439,13 @@ local function requestImage(path)
                     task.wait(.25)
                 else
                 local p = table.remove(imageQueue,1)
-                local ok, data = timedCall("Artwork fetch/cache", loadImage, p)
-                images[p].data = ok and data or nil
-                images[p].state = images[p].data and "ok" or "failed"
+                if state.open and tick()-(images[p].lastWanted or 0) < .75 then
+                    local ok, data = timedCall("Artwork fetch/cache", loadImage, p)
+                    images[p].data = ok and data or nil
+                    images[p].state = images[p].data and "ok" or "failed"
+                else
+                    images[p] = nil
+                end
                 artworkRevision=artworkRevision+1
                 end
             end
@@ -5573,6 +5577,7 @@ local function circle(x, y, r, color, z, filled, thick)
 end
 -- A picture from the site; false while it downloads. `key` names the spot it
 -- is drawn in when the same file shows more than once.
+local decodedThisFrame, nextDecodeAt = false, 0
 local function picture(path, x, y, w, h, z, key, alpha)
     if not path then return false end
     local e = requestImage(path)
@@ -5580,7 +5585,9 @@ local function picture(path, x, y, w, h, z, key, alpha)
     key = key or path
     local slot = imageObjects[key]
     if not slot or slot.path ~= path then
-        if shared.busy or upstreamBusy() then return false end
+        if shared.busy or upstreamBusy() or decodedThisFrame or tick()<nextDecodeAt
+            or ismouse1pressed() or tick()-lastInteraction<.35 then return false end
+        decodedThisFrame=true;nextDecodeAt=tick()+.08
         if slot then pcall(function() slot.obj:Remove() end) end
         local obj = Drawing.new("Image")
         obj.Visible = false
@@ -5602,6 +5609,7 @@ local function picture(path, x, y, w, h, z, key, alpha)
     return true
 end
 local function beginFrame()
+    decodedThisFrame=false
     for k in pairs(Used) do Used[k] = 0 end
     drawnImages = {}
 end
@@ -5746,7 +5754,7 @@ local function scroller(id, x, y, w, h, total, visible)
     -- The bar: drag the thumb, or click above or below it to move a page.
     -- (Matcha can't read the mouse wheel.)
     if maxFirst > 0 then
-        local bx, bw = x + w + 4, 8
+        local bx, bw = x + w + 2, 12
         local barH = math.max(28, h * visible / total)
         local barY = y + (h - barH) * s.first / maxFirst
         local onBar = over(bx - 2, y, bw + 4, h)
@@ -5900,6 +5908,7 @@ local SLOT_ORDER = {"Primary", "Secondary", "Melee", "Utility", "Other"}
 local function drawWeaponMain(x, y, w, h)
     rect(x, y, w, h, C.panel, 2, 8)
     text("Weapons", x + 16, y + 14, C.text, 15, 5, true)
+    text("Drag list/bar or use arrow keys",x+114,y+16,C.faint,11,5)
     local setCount = 0
     for _, wpn in ipairs(catalog.weapons) do
         if (state.values.skins or {})[wpn.name] or swapCount(wpn.name) > 0 then setCount = setCount + 1 end
@@ -6589,9 +6598,9 @@ local DRAW = {Skins = drawSkins, Cosmetics = drawCosmetics, Visuals = drawVisual
     Settings = drawSettings}
 DRAW.Updates = function(x,y,w,h)
     rect(x,y,w,h,C.panel,2,8)
-    text("Update log / 3.5.3 / October 12, 2026",x+20,y+20,C.text,18,5,true)
-    local entries={"Cached text fitting; no repeated fully hidden redraws.",
-        "Removed duplicate layout-search offsets and initial yield.",
+    text("Update log / 3.5.4 / October 12, 2026",x+20,y+20,C.text,18,5,true)
+    local entries={"Paced image decoding; stale queued artwork skipped.",
+        "Wider scrollbars; drag or use arrow/Page keys.",
         "Unavailable community skies disabled to prevent crashes.",
         "420px skin artwork where supplied; corner resizing.",
         "Bundled engine; guarded memory access during transitions.",
@@ -6702,7 +6711,7 @@ local function drawWindow(slide)
     rect(x - 1, y - 1, w + 2, h + 2, C.line, 0, 11)
     rect(x, y, w, h, C.bg, 1, 10)
     text("Rivals", x + 16, y + 12, C.text, 16, 5, true)
-    text("Skin Changer", x + 16 + textWidth("Rivals ", 16, true), y + 12, C.accent, 16, 5, true)
+    text("Skin Changer", x + 28 + textWidth("Rivals", 16, true), y + 12, C.accent, 16, 5, true)
     if button(x + w - 144, y + 8, 100, 24, "Update log") then state.tab="Updates" end
     if button(x + w - 36, y + 8, 26, 24, "x") then state.open = false end
     line(x, y + 40, x + w, y + 40, C.line, 2, 1)

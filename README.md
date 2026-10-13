@@ -1,4 +1,4 @@
-# Rivals Skin Changer 3.5.3
+# Rivals Skin Changer 3.5.4
 
 Hybrid of Martini's FULLMATCHA GUI/engine and our loader improvements. Open with:
 
@@ -62,3 +62,6 @@ New artwork downloads and image decoding wait until Apply completes; already dec
 
 ## October 12 — performance update 3.5.3
 Repeated text fitting uses a bounded cache keyed by text, width, size and weight. Fully hidden windows skip drawing work after the closing frame while continuing to poll input. Layout detection searches unique offsets in the same priority order and checks the first candidate without an initial scheduler wait. Skin application, memory guards, configuration and artwork quality are unchanged. Mock operation counts verify reduced work; live FPS and apply-time improvement have not been measured.
+
+## October 12 — artwork responsiveness 3.5.4
+New textures decode at most once per redraw, at least 80ms apart, and pause during mouse interaction and Apply. Already decoded images retain their quality. Queued images from hidden/old pages are skipped and requeued when revisited. Scrollbars are wider and the weapon page shows supported scrolling controls. Wheel reading is not exposed by the documented Matcha input API; use dragging, arrows or Page Up/Down. Single synchronous downloads/decodes can still cause a pause.

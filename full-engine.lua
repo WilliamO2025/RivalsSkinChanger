@@ -2061,15 +2061,19 @@ ROUTE.detect = function(ms)
             tt, x, y, lsize, ao, so, no))
         return true
     end
-    local xs = {ROUTE.globalState, 0x18, 0x68}
-    for x = 0, 0x100, 8 do xs[#xs + 1] = x end
+    local xs, seenOffsets = {}, {}
+    local function addOffset(x)
+        if not seenOffsets[x] then xs[#xs + 1], seenOffsets[x] = x, true end
+    end
+    addOffset(ROUTE.globalState); addOffset(0x18); addOffset(0x68)
+    for x = 0, 0x100, 8 do addOffset(x) end
     -- The registry has sat at +0x620 for a long time: try that first, and
     -- the whole global state only now and then (it is a few thousand reads).
     local full = not ROUTE.nextFull or tick() >= ROUTE.nextFull
     if full then ROUTE.nextFull = tick() + 10 end
     for pass = 1, full and 2 or 1 do
-        for _, x in ipairs(xs) do
-            task.wait()
+        for index, x in ipairs(xs) do
+            if index > 1 then task.wait() end
             local g = rd(thread + x)
             if g and g > 0x10000 and g < 0x7fffffffffff then
                 if pass == 1 then trace.pointers = trace.pointers + 1 end

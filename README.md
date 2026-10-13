@@ -1,4 +1,4 @@
-# Rivals Skin Changer 3.5.2
+# Rivals Skin Changer 3.5.3
 
 Hybrid of Martini's FULLMATCHA GUI/engine and our loader improvements. Open with:
 
@@ -59,3 +59,6 @@ Loading responsiveness: long read-only table, nearby-node and layout searches no
 
 ## October 12 — Apply responsiveness 3.5.2
 New artwork downloads and image decoding wait until Apply completes; already decoded artwork remains visible. The bundled engine is compiled once per GUI session and rerun for each Apply. Slow compilation, engine execution, artwork loading/decoding, support-list HTTP and GUI polling gaps are logged with the prefix `[Rivals GUI timing]`. Elapsed engine timing includes normal waits and is not a CPU measurement. The support-list check remains unchanged. An already-running synchronous host call cannot be interrupted by these changes.
+
+## October 12 — performance update 3.5.3
+Repeated text fitting uses a bounded cache keyed by text, width, size and weight. Fully hidden windows skip drawing work after the closing frame while continuing to poll input. Layout detection searches unique offsets in the same priority order and checks the first candidate without an initial scheduler wait. Skin application, memory guards, configuration and artwork quality are unchanged. Mock operation counts verify reduced work; live FPS and apply-time improvement have not been measured.

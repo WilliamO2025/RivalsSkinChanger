@@ -1,4 +1,4 @@
--- Rivals Skin Changer 3.5.2; upstream Martini; see UPSTREAM.md for credits.
+-- Rivals Skin Changer 3.5.3; upstream Martini; see UPSTREAM.md for credits.
 
 -- Upgrade from our 2.x GUI. Only our own state and preferences are consulted.
 local old = _G.__RIVALS_SKIN_GUI
@@ -2089,15 +2089,19 @@ ROUTE.detect = function(ms)
             tt, x, y, lsize, ao, so, no))
         return true
     end
-    local xs = {ROUTE.globalState, 0x18, 0x68}
-    for x = 0, 0x100, 8 do xs[#xs + 1] = x end
+    local xs, seenOffsets = {}, {}
+    local function addOffset(x)
+        if not seenOffsets[x] then xs[#xs + 1], seenOffsets[x] = x, true end
+    end
+    addOffset(ROUTE.globalState); addOffset(0x18); addOffset(0x68)
+    for x = 0, 0x100, 8 do addOffset(x) end
     -- The registry has sat at +0x620 for a long time: try that first, and
     -- the whole global state only now and then (it is a few thousand reads).
     local full = not ROUTE.nextFull or tick() >= ROUTE.nextFull
     if full then ROUTE.nextFull = tick() + 10 end
     for pass = 1, full and 2 or 1 do
-        for _, x in ipairs(xs) do
-            task.wait()
+        for index, x in ipairs(xs) do
+            if index > 1 then task.wait() end
             local g = rd(thread + x)
             if g and g > 0x10000 and g < 0x7fffffffffff then
                 if pass == 1 then trace.pointers = trace.pointers + 1 end
@@ -5266,7 +5270,7 @@ local function upstreamBusy()
     return type(stamp) == "number" and tick() - stamp < 180
 end
 local function changerSource()
-    return BUNDLED_ENGINE, "bundled 3.5.2"
+    return BUNDLED_ENGINE, "bundled 3.5.3"
 end
 local compiledChanger
 local function apply()
@@ -5524,7 +5528,7 @@ local function textWidth(s, size, bold)
     widths[key], widthCount = w, widthCount + 1
     return w
 end
-local function fitText(s, room, size, bold)
+local function computeFitText(s, room, size, bold)
     s = tostring(s)
     if textWidth(s, size, bold) <= room then return s end
     local lo, hi = 0, #s
@@ -5533,6 +5537,16 @@ local function fitText(s, room, size, bold)
         if textWidth(s:sub(1, mid) .. "..", size, bold) <= room then lo = mid else hi = mid - 1 end
     end
     return s:sub(1, math.max(1, lo)) .. ".."
+end
+local fitCache, fitCount = {}, 0
+local function fitText(s, room, size, bold)
+    local key = tostring(s) .. "\1" .. tostring(room) .. "\1" .. tostring(size) .. (bold and "b" or "")
+    local result = fitCache[key]
+    if result ~= nil then return result end
+    result = computeFitText(s, room, size, bold)
+    if fitCount >= 2048 then fitCache, fitCount = {}, 0 end
+    fitCache[key], fitCount = result, fitCount + 1
+    return result
 end
 local function text(s, x, y, color, size, z, bold, center)
     s = tostring(s)
@@ -6575,9 +6589,9 @@ local DRAW = {Skins = drawSkins, Cosmetics = drawCosmetics, Visuals = drawVisual
     Settings = drawSettings}
 DRAW.Updates = function(x,y,w,h)
     rect(x,y,w,h,C.panel,2,8)
-    text("Update log / 3.5.2 / October 12, 2026",x+20,y+20,C.text,18,5,true)
-    local entries={"Pause artwork during Apply; reuse the compiled engine.",
-        "Slow-operation timing logs help identify remaining stalls.",
+    text("Update log / 3.5.3 / October 12, 2026",x+20,y+20,C.text,18,5,true)
+    local entries={"Cached text fitting; no repeated fully hidden redraws.",
+        "Removed duplicate layout-search offsets and initial yield.",
         "Unavailable community skies disabled to prevent crashes.",
         "420px skin artwork where supplied; corner resizing.",
         "Bundled engine; guarded memory access during transitions.",
@@ -6785,6 +6799,7 @@ local function frame()
 
     local signature=table.concat({tostring(state.tab),tostring(state.skinsView),tostring(state.weapon),
         tostring(state.open),tostring(shown),tostring(state.status),tostring(state.dirty),tostring(artworkRevision)},"|")
+    if shown == 0 and not state.open and signature == paintKey then return end
     local keyboard=focus~=nil or state.binding
     if not keyboard then
         for _,vk in ipairs({0x21,0x22,0x25,0x26,0x27,0x28,0x1B}) do

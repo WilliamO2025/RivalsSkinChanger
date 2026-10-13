@@ -51,7 +51,10 @@ do
     _G.__RIVALS_SUPPORT_ID = id
     if id then
         -- If the list can't be fetched the changer runs as usual.
+        local started = tick()
         local okList, list = pcall(function() return game:HttpGet(BLACKLIST_URL) end)
+        local elapsed = tick()-started
+        if elapsed >= .25 then print(string.format("[Rivals GUI timing] Upstream support-list request: %.2fs", elapsed)) end
         if okList and type(list) == "string" then
             for line in list:gmatch("[^\r\n]+") do
                 -- A listed ID stops here, without a message.

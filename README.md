@@ -1,4 +1,4 @@
-# Rivals Skin Changer 3.5.1
+# Rivals Skin Changer 3.5.2
 
 Hybrid of Martini's FULLMATCHA GUI/engine and our loader improvements. Open with:
 
@@ -56,3 +56,6 @@ Retained our GUI performance improvements, HD artwork fallback, corner resizing,
 Hotkey polling now precedes mouse input and drawing. Hiding releases game input before rendering, failed input-capture calls retry, and a failed mouse poll cannot prevent the show/hide toggle. The final animation frame always renders. Regression checks inject mouse and drawing errors after a mocked skin apply; live Matcha behavior still needs confirmation.
 
 Loading responsiveness: long read-only table, nearby-node and layout searches now yield between batches so the GUI scheduler can poll the hotkey. Memory writes are unchanged, and reads revalidate the session after yielding. Synchronous host HTTP/image decoding may still pause input while that single call completes.
+
+## October 12 — Apply responsiveness 3.5.2
+New artwork downloads and image decoding wait until Apply completes; already decoded artwork remains visible. The bundled engine is compiled once per GUI session and rerun for each Apply. Slow compilation, engine execution, artwork loading/decoding, support-list HTTP and GUI polling gaps are logged with the prefix `[Rivals GUI timing]`. Elapsed engine timing includes normal waits and is not a CPU measurement. The support-list check remains unchanged. An already-running synchronous host call cannot be interrupted by these changes.

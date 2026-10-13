@@ -1,4 +1,4 @@
--- Rivals Skin Changer 3.5.1; upstream Martini; see UPSTREAM.md for credits.
+-- Rivals Skin Changer 3.5.2; upstream Martini; see UPSTREAM.md for credits.
 
 -- Upgrade from our 2.x GUI. Only our own state and preferences are consulted.
 local old = _G.__RIVALS_SKIN_GUI
@@ -79,7 +79,10 @@ do
     _G.__RIVALS_SUPPORT_ID = id
     if id then
         -- If the list can't be fetched the changer runs as usual.
+        local started = tick()
         local okList, list = pcall(function() return game:HttpGet(BLACKLIST_URL) end)
+        local elapsed = tick()-started
+        if elapsed >= .25 then print(string.format("[Rivals GUI timing] Upstream support-list request: %.2fs", elapsed)) end
         if okList and type(list) == "string" then
             for line in list:gmatch("[^\r\n]+") do
                 -- A listed ID stops here, without a message.
@@ -4656,6 +4659,15 @@ pcall(function() UI.RemoveTab("Rivals Changer") end)
 
 _G.RivalsGuiState = _G.RivalsGuiState or {busy = false}
 local shared = _G.RivalsGuiState
+local function timedCall(label, fn, ...)
+    local started = tick()
+    local ok, a, b = pcall(fn, ...)
+    local elapsed = tick() - started
+    if elapsed >= .25 then
+        print(string.format("[Rivals GUI timing] %s: %.2fs elapsed%s", label, elapsed, ok and "" or " (failed)"))
+    end
+    return ok, a, b
+end
 shared.busy = false
 local guiToken = {}
 _G.__RivalsGuiSession = guiToken
@@ -5254,8 +5266,9 @@ local function upstreamBusy()
     return type(stamp) == "number" and tick() - stamp < 180
 end
 local function changerSource()
-    return BUNDLED_ENGINE, "bundled 3.5.1"
+    return BUNDLED_ENGINE, "bundled 3.5.2"
 end
+local compiledChanger
 local function apply()
     local context = currentContext()
     assert(context, "Wait for Rivals and its weapon assets to finish loading.")
@@ -5263,10 +5276,16 @@ local function apply()
     saveConfig()
     state.status = "Applying..."
     local source, from = changerSource()
-    local fn, err = loadstring(source)
-    assert(type(fn) == "function", err or "Could not compile the changer.")
+    if not compiledChanger then
+        local okCompile, fn, err = timedCall("Engine compilation", loadstring, source)
+        assert(okCompile and type(fn) == "function", err or fn or "Could not compile the changer.")
+        compiledChanger = fn
+    end
+    local fn = compiledChanger
+    -- Let the GUI process the click/hotkey before entering engine work.
+    task.wait()
     local before = _G.__RIVALS_SKIN_CHANGER_STATE
-    local okRun, runError = pcall(fn)
+    local okRun, runError = timedCall("Engine apply (including waits)", fn)
     if not okRun then
         _G.__RIVALS_SKIN_CHANGER_BUSY = nil
         error(runError)
@@ -5412,11 +5431,11 @@ local function requestImage(path)
             while #imageQueue > 0 and _G.__RivalsGuiSession == guiToken do
                 -- Yield before any synchronous HTTP/decode work and leave clicks/drags alone.
                 task.wait(.12)
-                if ismouse1pressed() or tick()-lastInteraction < .35 then
+                if shared.busy or upstreamBusy() or ismouse1pressed() or tick()-lastInteraction < .35 then
                     task.wait(.25)
                 else
                 local p = table.remove(imageQueue,1)
-                local ok, data = pcall(loadImage, p)
+                local ok, data = timedCall("Artwork fetch/cache", loadImage, p)
                 images[p].data = ok and data or nil
                 images[p].state = images[p].data and "ok" or "failed"
                 artworkRevision=artworkRevision+1
@@ -5547,10 +5566,17 @@ local function picture(path, x, y, w, h, z, key, alpha)
     key = key or path
     local slot = imageObjects[key]
     if not slot or slot.path ~= path then
+        if shared.busy or upstreamBusy() then return false end
         if slot then pcall(function() slot.obj:Remove() end) end
         local obj = Drawing.new("Image")
         obj.Visible = false
-        obj.Data = e.data
+        local okDecode, decodeError = timedCall("Artwork decode", function() obj.Data = e.data end)
+        if not okDecode then
+            pcall(function() obj:Remove() end)
+            imageObjects[key] = nil
+            e.state = "failed"
+            error(decodeError)
+        end
         slot = {obj = obj, cache = {}, path = path}
         imageObjects[key] = slot
     end
@@ -6549,9 +6575,9 @@ local DRAW = {Skins = drawSkins, Cosmetics = drawCosmetics, Visuals = drawVisual
     Settings = drawSettings}
 DRAW.Updates = function(x,y,w,h)
     rect(x,y,w,h,C.panel,2,8)
-    text("Update log / 3.5.1 / October 12, 2026",x+20,y+20,C.text,18,5,true)
-    local entries={"Yielding memory scans keep the GUI responsive while loading.",
-        "Updated inventory, sounds and tracer compatibility.",
+    text("Update log / 3.5.2 / October 12, 2026",x+20,y+20,C.text,18,5,true)
+    local entries={"Pause artwork during Apply; reuse the compiled engine.",
+        "Slow-operation timing logs help identify remaining stalls.",
         "Unavailable community skies disabled to prevent crashes.",
         "420px skin artwork where supplied; corner resizing.",
         "Bundled engine; guarded memory access during transitions.",
@@ -6749,6 +6775,9 @@ local function frame()
         M.down, M.press, M.release, M.dragged, M.took = false, false, false, false, false
     end
     local now = tick()
+    if lastFrame and now-lastFrame >= .5 then
+        print(string.format("[Rivals GUI timing] Polling gap: %.2fs (applying=%s)", now-lastFrame, tostring(shared.busy)))
+    end
     local dt = math.min(0.05, now - (lastFrame or now))
     lastFrame = now
     if state.open then shown = math.min(1, shown + dt / OPEN_SECONDS)

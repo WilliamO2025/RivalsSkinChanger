@@ -65,3 +65,6 @@ Repeated text fitting uses a bounded cache keyed by text, width, size and weight
 
 ## October 12 — artwork responsiveness 3.5.4
 New textures decode at most once per redraw, at least 80ms apart, and pause during mouse interaction and Apply. Already decoded images retain their quality. Queued images from hidden/old pages are skipped and requeued when revisited. Scrollbars are wider and the weapon page shows supported scrolling controls. Wheel reading is not exposed by the documented Matcha input API; use dragging, arrows or Page Up/Down. Single synchronous downloads/decodes can still cause a pause.
+
+## October 13 — automatic update launcher
+Autoexec requests this repository’s main-branch GUI on every join with a fresh request parameter, retries download failures up to three times and logs the loaded version. It never falls back to an old local GUI. A running GUI is not replaced mid-match; updates load on the next join. Network/service failures can still prevent loading.

@@ -13,8 +13,13 @@ local URL = "https://raw.githubusercontent.com/WilliamO2025/RivalsSkinChanger/ma
 local RIVALS_GAME_ID = 6035872082
 
 local function download()
-    local ok, body = pcall(function() return game:HttpGet(URL) end)
-    if ok and type(body) == "string" and #body > 0 then return body, "github" end
+    for attempt = 1, 3 do
+        -- A new URL per request avoids reusing a cached main-branch response.
+        local requestUrl = URL .. "?refresh=" .. tostring(math.floor(tick()*1000)) .. "-" .. tostring(attempt)
+        local ok, body = pcall(function() return game:HttpGet(requestUrl) end)
+        if ok and type(body) == "string" and #body > 0 then return body, "GitHub main" end
+        if attempt < 3 then task.wait(attempt) end
+    end
 end
 
 -- Autoexec runs before the game exists, and a yield out here would throw, so
@@ -41,10 +46,11 @@ task.spawn(function()
 
     local source, from = download()
     if not source then
-        warn("[Rivals GUI] RivalsSkinGui.lua not found in the workspace and the download failed.")
+        warn("[Rivals GUI] Could not download the current GitHub version after 3 attempts. No old local copy was loaded.")
         return
     end
 
+    local version = source:match("Rivals Skin Changer ([%d%.]+)") or "unknown"
     local fn, err = loadstring(source)
     if type(fn) ~= "function" then
         warn("[Rivals GUI] Could not compile the GUI: " .. tostring(err))
@@ -57,6 +63,6 @@ task.spawn(function()
     if not okRun then
         warn("[Rivals GUI] " .. tostring(runErr))
     else
-        print("[Rivals GUI] Loaded from " .. tostring(from) .. ".")
+        print("[Rivals GUI] Loaded from " .. tostring(from) .. " (version " .. version .. ").")
     end
 end)

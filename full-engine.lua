@@ -130,11 +130,11 @@ local function validSession()
     return ok and valid == true
 end
 mrd = function(kind, address)
-    if not validSession() then error("Server assets changed; memory read cancelled") end
+    if not validSession() then assert(false, "Server assets changed; memory read cancelled") end
     return rawRead(kind, address)
 end
 mwr = function(kind, address, value)
-    if not validSession() then error("Server assets changed; memory write cancelled") end
+    if not validSession() then assert(false, "Server assets changed; memory write cancelled") end
     return rawWrite(kind, address, value)
 end
 end

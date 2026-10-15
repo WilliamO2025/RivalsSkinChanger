@@ -1,4 +1,4 @@
--- Rivals Skin Changer 3.6; upstream Martini; see UPSTREAM.md for credits.
+-- Rivals Skin Changer 3.6.1; upstream Martini; see UPSTREAM.md for credits.
 
 -- Upgrade from our 2.x GUI. Only our own state and preferences are consulted.
 local old = _G.__RIVALS_SKIN_GUI
@@ -158,11 +158,11 @@ local function validSession()
     return ok and valid == true
 end
 mrd = function(kind, address)
-    if not validSession() then error("Server assets changed; memory read cancelled") end
+    if not validSession() then assert(false, "Server assets changed; memory read cancelled") end
     return rawRead(kind, address)
 end
 mwr = function(kind, address, value)
-    if not validSession() then error("Server assets changed; memory write cancelled") end
+    if not validSession() then assert(false, "Server assets changed; memory write cancelled") end
     return rawWrite(kind, address, value)
 end
 end
@@ -5461,7 +5461,7 @@ local function upstreamBusy()
     return type(stamp) == "number" and tick() - stamp < 180
 end
 local function changerSource()
-    return BUNDLED_ENGINE, "bundled 3.6"
+    return BUNDLED_ENGINE, "bundled 3.6.1"
 end
 local compiledChanger
 local function apply()
@@ -5483,7 +5483,7 @@ local function apply()
     local okRun, runError = timedCall("Engine apply (including waits)", fn)
     if not okRun then
         _G.__RIVALS_SKIN_CHANGER_BUSY = nil
-        error(runError)
+        assert(false, runError)
     end
     local deadline = tick() + 150
     while tick() < deadline do
@@ -5494,13 +5494,14 @@ local function apply()
         end
         local finished = _G.__RIVALS_SKIN_CHANGER_STATE
         if type(finished) == "table" and finished ~= before and finished.wfAddr == context.wf and not upstreamBusy() then
+            _G.__RivalsGuiAutoApplied = context.key
             state.status = "Applied (" .. from .. "). Respawn to see new effects."
             return
         end
         state.status = "Applying... (a few seconds)"
         task.wait(0.5)
     end
-    error("The changer did not finish within 150s. Check the Matcha console.")
+    assert(false, "The changer did not finish within 150s. Check the Matcha console.")
 end
 local function job(label, fn)
     if shared.busy then return end
@@ -5509,6 +5510,7 @@ local function job(label, fn)
         local ok, err = pcall(fn)
         shared.busy = false
         if not ok then
+            state.open = true
             state.status = "Error: " .. tostring(err):gsub("^.-:%d+: ", ""):sub(1, 90)
             print("[Rivals GUI] " .. tostring(err))
         end
@@ -6791,9 +6793,9 @@ local DRAW = {Skins = drawSkins, Cosmetics = drawCosmetics, Visuals = drawVisual
     Settings = drawSettings}
 DRAW.Updates = function(x,y,w,h)
     rect(x,y,w,h,C.panel,2,8)
-    text("Update log / 3.6 / October 14, 2026",x+20,y+20,C.text,18,5,true)
-    local entries={"Updated inventory and sound memory-layout detection.",
-        "Dynamic offsets, saved fallback and live validation.",
+    text("Update log / 3.6.1 / October 14, 2026",x+20,y+20,C.text,18,5,true)
+    local entries={"Auto-apply waits for a stable loading context.",
+        "Visible errors and stop reasons; transient IDs tolerated.",
         "Unavailable community skies disabled to prevent crashes.",
         "420px skin artwork where supplied; corner resizing.",
         "Bundled engine; guarded memory access during transitions.",
@@ -7031,7 +7033,8 @@ local function frame()
 end
 
 local alive = true
-local function stop()
+local function stop(reason)
+    print("[Rivals GUI] Stopped: " .. tostring(reason or "replaced or manually stopped"))
     alive = false
     if _G.__RivalsGuiSession == guiToken then _G.__RivalsGuiSession = nil end
     pcall(wipe)
@@ -7054,21 +7057,31 @@ _G.__RivalsDrawnGui = {stop = stop, state = state, dump = dump, win = win}
 -- Auto-apply, once per server, like the menu-tab GUI.
 local function autoApplyOnJoin()
     task.spawn(function()
+        local candidate, stableSince, attempted
         while alive and _G.__RivalsGuiSession == guiToken do
+            local okStep, stepError = pcall(function()
             local okFile, hasFile = pcall(isfile, SETTINGS)
             if not state.settingsRead and okFile and hasFile then pcall(loadSettings) end
             local context = state.autoApply and currentContext()
             local key = context and context.key
+            if key ~= candidate then candidate, stableSince = key, tick() end
+            if not key or tick()-(stableSince or tick()) < 2 then return end
             local applied = _G.__RIVALS_SKIN_CHANGER_STATE
-            if key and _G.__RivalsGuiAutoApplied ~= key and applied and applied.wfAddr == context.wf then
+            if key and _G.__RivalsGuiAutoApplied ~= key and applied and applied.wfAddr == context.wf and (not applied.jobId or applied.jobId == game.JobId) then
                 _G.__RivalsGuiAutoApplied = key
-            elseif key and _G.__RivalsGuiAutoApplied ~= key and not shared.busy and not upstreamBusy() then
+            elseif key and _G.__RivalsGuiAutoApplied ~= key and attempted ~= key and not shared.busy and not upstreamBusy() then
                 if isfile(FILE) and readfile(FILE):find("%S") then
-                    _G.__RivalsGuiAutoApplied = key
+                    attempted = key
                     if not state.dirty then loadConfig() end
                     if #catalog.weapons == 0 then pcall(loadCatalog) end
                     job("Auto-applying...", apply)
                 end
+            end
+            end)
+            if not okStep then
+                state.open = true
+                state.status = "Auto-apply error; see console. Use Save & Apply to retry."
+                print("[Rivals GUI] Auto-apply check failed: " .. tostring(stepError))
             end
             task.wait(2)
         end
@@ -7092,21 +7105,24 @@ task.spawn(function()
 end)
 
 task.spawn(function()
-    local lastError
+    local lastError, otherSince, stopReason
     while alive and _G.__RivalsGuiSession == guiToken do
-        if otherGame() then
-            print("[Rivals GUI] Not RIVALS - the GUI stays off in this game.")
-            break
+        local okLoaded, loaded = pcall(function() return game:IsLoaded() end)
+        if okLoaded and loaded and otherGame() then
+            otherSince = otherSince or tick()
+            if tick()-otherSince >= 5 then stopReason="left RIVALS for another game";break end
+        else
+            otherSince=nil
         end
         local ok, err = pcall(frame)
         if not ok and tostring(err) ~= lastError then
             lastError = tostring(err)
             print("[Rivals GUI] " .. lastError)
         end
-        if state.unload then break end
+        if state.unload then stopReason="Unload button";break end
         task.wait(.016)
     end
-    stop()
+    stop(stopReason or "GUI session replaced")
 end)
 autoApplyOnJoin()
 if startedHidden and type(notify) == "function" then

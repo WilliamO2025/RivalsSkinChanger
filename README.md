@@ -1,4 +1,4 @@
-# Rivals Skin Changer 3.6
+# Rivals Skin Changer 3.6.1
 
 Hybrid of Martini's FULLMATCHA GUI/engine and our loader improvements. Open with:
 
@@ -71,3 +71,6 @@ Autoexec requests this repository’s main-branch GUI on every join with a fresh
 
 ## October 14 — upstream compatibility fixes 3.6
 Integrated FULLMATCHA revision 938e0aa72db6ee42d6bf9637ac42d9f74efe693e. GUI inventory and sound lookups now detect memory layouts dynamically. The engine fetches offsets from offsets.imtheo.lol/Offsets.json, retains a local last-good JSON fallback, and checks core Instance offsets against the running game. Updated sky, sound, display-name, lighting and mesh offsets follow the new lookup. Existing GUI, artwork pacing, performance changes and fresh-main autoexec remain. Validation uses isolated mocks, not live Roblox memory.
+
+## October 14 — startup lifecycle fix 3.6.1
+Auto-apply waits for a stable context, catches polling/file errors and marks completion only after a confirmed apply. Failed attempts remain available for manual retry rather than repeatedly mutating memory. Apply errors open the GUI with a message; renderer stop reasons are logged. A non-Rivals ID must persist for five seconds while loaded before closing the GUI. Session-memory guards now use catchable assertions even on hosts where error() only logs. These changes cannot preserve a runtime that Matcha itself terminates.

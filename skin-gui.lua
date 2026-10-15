@@ -1,4 +1,4 @@
--- Rivals Skin Changer 3.5.4; upstream Martini; see UPSTREAM.md for credits.
+-- Rivals Skin Changer 3.6; upstream Martini; see UPSTREAM.md for credits.
 
 -- Upgrade from our 2.x GUI. Only our own state and preferences are consulted.
 local old = _G.__RIVALS_SKIN_GUI
@@ -128,7 +128,7 @@ if not wf then
     return
 end
 
-do
+local function waitForAssets()
     local lastWf, lastVm = -1, -1
     for _ = 1, 20 do
         local wfCount = #wf:GetChildren()
@@ -138,6 +138,7 @@ do
         task.wait(0.3)
     end
 end
+waitForAssets()
 
 -- Memory
 local mrd, mwr
@@ -176,12 +177,123 @@ local wr = function(a, v)
     pcall(mwr, "uintptr_t", a, v)
 end
 
+-- Offsets. Taken from the latest Roblox offsets dump (offsets.imtheo.lol),
+-- which is saved to a file so the last good one is used when the site is
+-- down. The numbers after each name are the fallback (Roblox build cec3ad5).
+-- The Instance offsets are then checked on the live game and found by
+-- scanning if they are wrong, so an update that moves them doesn't stop the
+-- changer even before the dump has caught up.
+local dumpOff = (function()
+    local OFFSETS_CACHE = "rivals_offsets_cache.json"
+    local URLS = {"https://offsets.imtheo.lol/Offsets.json"}
+    local hs = game:GetService("HttpService")
+    local function decode(raw)
+        if type(raw) ~= "string" or #raw < 200 then return nil end
+        local ok, data = pcall(function() return hs:JSONDecode(raw) end)
+        if ok and type(data) == "table" and type(data.Offsets) == "table" then return data end
+    end
+    local data, from
+    for _, url in ipairs(URLS) do
+        local ok, raw = pcall(function() return game:HttpGet(url) end)
+        data = ok and decode(raw) or nil
+        if data then
+            from = "online"
+            pcall(writefile, OFFSETS_CACHE, raw)
+            break
+        end
+    end
+    if not data then
+        local ok, raw = pcall(function() return isfile(OFFSETS_CACHE) and readfile(OFFSETS_CACHE) or nil end)
+        data = ok and decode(raw) or nil
+        if data then from = "saved copy" end
+    end
+    local dump = data and data.Offsets or {}
+    _G.__RSC_OFFSETS = {from = from or "built-in", version = data and data["Roblox Version"]}
+    return function(class, field, default)
+        local c = dump[class]
+        local v = type(c) == "table" and tonumber(c[field])
+        if v and v > 0 and v < 0x4000 then return v end
+        return default
+    end
+end)()
+
 local OFF = {
-    Parent = 104,
-    NameContainer = 112,
-    Children = 120,
-    Transparency = 288
+    Parent = dumpOff("Instance", "Parent", 104),
+    NameContainer = dumpOff("Instance", "NameContainer", 112),
+    Children = dumpOff("Instance", "ChildrenStart", 120),
+    Transparency = dumpOff("BasePart", "Transparency", 288)
 }
+
+local function verifyOffsets()
+    local fixed = {}
+    local function stdString(p)
+        if not p or p < 0x10000 then return nil end
+        local size, cap = rd(p + 16), rd(p + 24)
+        if not size or not cap or size > 200 or cap < size then return nil end
+        local ok, s = pcall(mrd, "string", cap > 15 and rd(p) or p)
+        if ok and type(s) == "string" then return s:sub(1, size) end
+    end
+    local function holdsChild(parent, child, off)
+        local n = rd(parent.Address + off)
+        local b, e = n and n > 0x10000 and rd(n), n and n > 0x10000 and rd(n + 8)
+        if not b or not e or e < b or (e - b) % 16 ~= 0 or e - b > 16 * 65536 then return false end
+        for s = b, math.min(e - 16, b + 16 * 4096), 16 do
+            if rd(s) == child.Address then return true end
+        end
+        return false
+    end
+    -- Parent: Weapons' parent is ViewModels, and ViewModels' is Assets.
+    local function parentOk(off) return rd(wf.Address + off) == vm.Address and rd(vm.Address + off) == A.Address end
+    if not parentOk(OFF.Parent) then
+        for off = 0x30, 0x200, 8 do
+            if parentOk(off) then OFF.Parent = off fixed[#fixed + 1] = "Parent" break end
+        end
+    end
+    -- Name: the name string of Weapons and ViewModels.
+    local function nameOk(off) return stdString(rd(wf.Address + off)) == "Weapons" and stdString(rd(vm.Address + off)) == "ViewModels" end
+    if not nameOk(OFF.NameContainer) then
+        for off = 0x30, 0x200, 8 do
+            if nameOk(off) then OFF.NameContainer = off fixed[#fixed + 1] = "Name" break end
+        end
+    end
+    -- Children: ViewModels' children list holds Weapons.
+    if not holdsChild(vm, wf, OFF.Children) then
+        for off = 0x30, 0x200, 8 do
+            if off ~= OFF.Parent and off ~= OFF.NameContainer and holdsChild(vm, wf, off) then
+                OFF.Children = off fixed[#fixed + 1] = "Children" break
+            end
+        end
+    end
+    -- Transparency: compared with what the game reports for a few parts.
+    local parts, seeThrough = {}, 0
+    for _, d in ipairs(wf:GetDescendants()) do
+        if d.ClassName == "Part" or d.ClassName == "MeshPart" then
+            local ok, t = pcall(function() return d.Transparency end)
+            if ok and type(t) == "number" then
+                parts[#parts + 1] = {d, t}
+                if t > 0.01 and t < 0.99 or t == 1 then seeThrough = seeThrough + 1 end
+            end
+            if #parts >= 40 and seeThrough >= 2 then break end
+        end
+    end
+    local function transpOk(off)
+        for _, p in ipairs(parts) do
+            local ok, v = pcall(mrd, "float", p[1].Address + off)
+            if not ok or not v or math.abs(v - p[2]) > 1e-4 then return false end
+        end
+        return true
+    end
+    -- All-opaque samples would match any zero float, so they prove nothing.
+    if seeThrough > 0 and not transpOk(OFF.Transparency) then
+        for off = 0x100, 0x200, 4 do
+            if transpOk(off) then OFF.Transparency = off fixed[#fixed + 1] = "Transparency" break end
+        end
+    end
+    local info = _G.__RSC_OFFSETS
+    print("[RivalsSkinChanger] Offsets: " .. info.from .. (info.version and (" (" .. info.version .. ")") or "")
+        .. (#fixed > 0 and (" - corrected on the live game: " .. table.concat(fixed, ", ")) or ""))
+end
+verifyOffsets()
 
 -- The undo data (what each swap overwrote) lives in _G, which a Matcha restart
 -- or update wipes while the game keeps the swaps. A run then would swap the
@@ -344,7 +456,7 @@ local function checkImgOffset()
     for _, d in ipairs(pg:GetDescendants()) do
         if d.ClassName == "ImageLabel" and d.Address then
             checked = checked + 1
-            for off = 0x980, 0xB00, 8 do
+            for off = 0x900, 0xC00, 8 do
                 local ptr = mrd("uintptr_t", d.Address + off)
                 if ptr and ptr > 0x10000000000 and ptr < 0x7FFFFFFFFFFF then
                     local s = mrd("string", ptr)
@@ -3042,7 +3154,9 @@ local SKYBOX_PRESETS = {
     ["classic"] = {"rbxasset://sky/sky512_bk.tex", "rbxasset://sky/sky512_dn.tex", "rbxasset://sky/sky512_ft.tex",
                    "rbxasset://sky/sky512_lf.tex", "rbxasset://sky/sky512_rt.tex", "rbxasset://sky/sky512_up.tex"}
 }
-local SKYBOX_FACES = {{"bk", 0xe8}, {"dn", 0x118}, {"ft", 0x148}, {"lf", 0x178}, {"rt", 0x1a8}, {"up", 0x1d8}}
+local SKYBOX_FACES = {{"bk", dumpOff("Sky", "SkyboxBk", 0xe8)}, {"dn", dumpOff("Sky", "SkyboxDn", 0x118)},
+    {"ft", dumpOff("Sky", "SkyboxFt", 0x148)}, {"lf", dumpOff("Sky", "SkyboxLf", 0x178)},
+    {"rt", dumpOff("Sky", "SkyboxRt", 0x1a8)}, {"up", dumpOff("Sky", "SkyboxUp", 0x1d8)}}
 
 local function skyboxAssetId(v)
     v = tostring(v):match("^%s*(.-)%s*$")
@@ -3245,9 +3359,10 @@ end
 -- at a fixed volume, so custom sounds come out louder or quieter. The game
 -- creates each hit, headshot and kill sound fresh, parented to the script
 -- that plays it (ClientViewModel for hits, EliminationSlots for kills); a
--- light watcher scales new ones by the chosen multiplier. Volume is the float
--- at +0x120 of a Sound.
-local SOUND_VOLUME_OFF = 0x120
+-- light watcher scales new ones by the chosen multiplier. Volume is a float
+-- on the Sound (offset from the dump, 0x120 on build cec3ad5).
+local SOUND_VOLUME_OFF = dumpOff("Sound", "Volume", 0x120)
+local SOUND_ID_OFF = dumpOff("Sound", "SoundId", 0xb8)
 local DEFAULT_SOUND_TEXT = {
     hit = {"rbxassetid://13110130082"},
     critical = {"rbxassetid://16537449730"},
@@ -3291,7 +3406,7 @@ local function startVolumeWatcher(conf)
                     local a = s.ClassName == "Sound" and s.Address
                     if a and not seen[a] then
                         seen[a] = now
-                        local ok, text = pcall(mrd, "string", rd(a + 0xb8))
+                        local ok, text = pcall(mrd, "string", rd(a + SOUND_ID_OFF))
                         local g = ok and gains[text]
                         if g then
                             local v = mrd("float", a + SOUND_VOLUME_OFF)
@@ -3330,7 +3445,7 @@ local SPOOF_ATTRS = {
 local NAME_EFFECTS = {prime = "Prime", gold = "Prime", contraband = "Contraband", purple = "Contraband",
     none = "", off = "", ["false"] = ""}
 local SPOOF_STATS = {level = "Level", streak = "Win Streak", elo = "Current ELO"}
-local DISPLAY_NAME_OFF = 0x128 -- Player.DisplayName, a std::string
+local DISPLAY_NAME_OFF = dumpOff("Player", "DisplayName", 0x128) -- Player.DisplayName, a std::string
 local GLYPHS, GLYPHS_END, GLYPH_SIZE = 0xc18, 0xc20, 56 -- laid-out glyphs, codepoint at +12
 local SPOOF_REAL_FILE = "rivals_spoof_real.txt"
 local DEVICES = {mousekeyboard = "MouseKeyboard", keyboard = "MouseKeyboard", pc = "MouseKeyboard",
@@ -3794,14 +3909,14 @@ end
 
 -- Lighting
 local LIGHTING_FIELDS = {
-    brightness = {off = 0x108, key = "Brightness"},
-    exposure = {off = 0x114, key = "ExposureCompensation"},
-    diffuse = {off = 0x10c, key = "EnvironmentDiffuseScale"},
-    specular = {off = 0x110, key = "EnvironmentSpecularScale"},
+    brightness = {off = dumpOff("Lighting", "Brightness", 0x108), key = "Brightness"},
+    exposure = {off = dumpOff("Lighting", "ExposureCompensation", 0x114), key = "ExposureCompensation"},
+    diffuse = {off = dumpOff("Lighting", "EnvironmentDiffuseScale", 0x10c), key = "EnvironmentDiffuseScale"},
+    specular = {off = dumpOff("Lighting", "EnvironmentSpecularScale", 0x110), key = "EnvironmentSpecularScale"},
     shadowsoftness = {off = nil, key = "ShadowSoftness"},
-    ambient = {off = 0xc0, key = "Ambient", color = true},
-    outdoor = {off = 0xf0, key = "OutdoorAmbient", color = true},
-    fogcolor = {off = 0xe4, key = "FogColor", color = true}
+    ambient = {off = dumpOff("Lighting", "Ambient", 0xc0), key = "Ambient", color = true},
+    outdoor = {off = dumpOff("Lighting", "OutdoorAmbient", 0xf0), key = "OutdoorAmbient", color = true},
+    fogcolor = {off = dumpOff("Lighting", "FogColor", 0xe4), key = "FogColor", color = true}
 }
 local LIGHTING_PRESETS = {
     ["dark"] = {brightness = 0.35, exposure = -1.3, diffuse = 0.15, specular = 0.2, ambient = 0.02, outdoor = 0.03, fogcolor = 0.02},
@@ -4089,7 +4204,7 @@ if ENABLE_SKIN_DATA_SYNC and (#skinDataPairs > 0 or #wrapPairs > 0) then
         notifyUser("Rivals Skin Changer", "Animation sync failed - skins are still swapped", 6)
     end
 end
-do
+local function applyPostEffects()
     local okSky, patched, skyNote = pcall(applySkybox, configSkybox)
     if okSky and (patched or 0) > 0 then
         local msg = "Skybox set on " .. tostring(patched) .. " map profiles - it shows on the next map or area load"
@@ -4100,9 +4215,7 @@ do
     elseif not okSky then
         print("[RivalsSkinChanger] Skybox error: " .. tostring(patched))
     end
-end
 
-do
     local okS, changed, soundNote = pcall(applySounds, configSounds)
     if okS and (changed or 0) > 0 then
         print("[RivalsSkinChanger] Sounds: " .. tostring(changed) .. " replaced - heard from the next hit"
@@ -4118,18 +4231,14 @@ do
     elseif not okV then
         print("[RivalsSkinChanger] Sound volume error: " .. tostring(watched))
     end
-end
 
-do
     local okP, spoofing, spoofNote = pcall(startSpoof, configSpoof)
     if okP and spoofing then
         print("[RivalsSkinChanger] Spoof on - only you see it" .. (spoofNote and (" (" .. spoofNote .. ")") or ""))
     elseif not okP then
         print("[RivalsSkinChanger] Spoof error: " .. tostring(spoofing))
     end
-end
 
-do
     local okL, applied, lightNote = pcall(applyLighting, configLighting, dictCache)
     if okL and (applied or 0) > 0 then
         print("[RivalsSkinChanger] Lighting: " .. tostring(applied) .. " settings" .. (lightNote and (" - " .. lightNote) or ""))
@@ -4139,14 +4248,13 @@ do
         print("[RivalsSkinChanger] Lighting error: " .. tostring(applied))
     end
 end
+applyPostEffects()
 
 -- Tracer colours
 -- Each shot's Beam.Color comes from a ColorSequence constant: TracerEffect's
 -- default, or the skin script's own (GetFriendlyTracerColor). Rewriting those
 -- constants recolours the tracers the game draws itself, so they don't lag.
--- Every address belongs to this server: each write checks it still holds what
--- it did, and the watcher stops when the server or the module changes.
-do
+local function applyTracersEffect()
     _G.__RIVALS_TRACERS = (_G.__RIVALS_TRACERS or 0) + 1
     local token = _G.__RIVALS_TRACERS
     if _G.__RIVALS_TRACER_CONN then pcall(function() _G.__RIVALS_TRACER_CONN:Disconnect() end) end
@@ -4361,6 +4469,7 @@ do
         print("[RivalsSkinChanger] Tracers: TracerEffect not loaded yet - fire once and run again")
     end
 end
+applyTracersEffect()
 
 -- No hands
 -- Your first-person arms are two parts with a SpecialMesh each; the game hides
@@ -4368,13 +4477,13 @@ end
 -- the weapons in [NoHands]: the scale is written in memory, then the part's
 -- Size is changed (a real property change) so the arm is drawn again with it.
 -- Arms are handled as their weapon comes out, and put back the same way.
-do
+local function applyNoHandsEffect()
     _G.__RIVALS_NOHANDS = (_G.__RIVALS_NOHANDS or 0) + 1
     local token = _G.__RIVALS_NOHANDS
     if _G.__RIVALS_NOHANDS_CONN then pcall(function() _G.__RIVALS_NOHANDS_CONN:Disconnect() end) end
     _G.__RIVALS_NOHANDS_CONN = nil
 
-    local MESH_SCALE = 0xB4 -- SpecialMesh.Scale, three floats
+    local MESH_SCALE = dumpOff("SpecialMesh", "Scale", 0xB4) -- SpecialMesh.Scale, three floats
     local ARM_SIZE, TINY = Vector3.new(1.8, 0.45, 0.45), Vector3.new(0.001, 0.001, 0.001)
     local job = game.JobId
     -- What was hidden, kept across runs (same server) so it can be put back:
@@ -4473,6 +4582,7 @@ do
         end
     end
 end
+applyNoHandsEffect()
 
 -- Finishers and charms
 -- Season rank charms
@@ -4601,6 +4711,7 @@ end
 _G.__RIVALS_SKIN_CHANGER_STATE = {restores = memoryRestores, wfAddr = wf.Address, jobId = game.JobId, nameCopies = nameCopies, dicts = dictCache, floats = floatRestores}
 saveUndo()
 _G.__RIVALS_SKIN_CHANGER_BUSY = nil
+
 ]====]
 -- Rivals changer GUI, drawn on screen
 -- Edits rivals_config.lua and runs the skin changer, in a window of its own
@@ -5046,32 +5157,112 @@ end
 -- item libraries. nil when it can't be read; the lists then show everything.
 local inventory = nil
 local readInventory
+local detectLayout
 do
     local mrd = memory_read
     local function rd(a) local ok, v = pcall(mrd, "uintptr_t", a) return ok and v or nil end
     local function rint(a) local ok, v = pcall(mrd, "int", a) return ok and v or nil end
     local function rbyte(a) local ok, v = pcall(mrd, "byte", a) return ok and v or nil end
-    -- Roblox moves Luau's layout between builds: the header byte with an
-    -- object's type (+1 in build 02c37bc, +0 in cec3ad5), the one with a
-    -- table's lsizenode, and the thread's global state. The changer finds
-    -- them and shares them as _G.__RSC_LAYOUT; until it has, this checks
-    -- the thread's header and the known global-state offsets itself.
+    -- Finds tt, globalState, registry, lsizenode, array and node pointers
+    -- dynamically at runtime across Roblox updates, falling back to known builds.
     local TAG_TABLE, TAG_THREAD = 7, 10
     -- Known builds: 02c37bc (type byte +1) and cec3ad5 (type byte +0).
     local KNOWN = {[1] = {tt = 1, globalState = 0x68, registry = 0x620, lsize = 4, sizearray = 8, array = 0x20, node = 0x18},
         [0] = {tt = 0, globalState = 0x18, registry = 0x620, lsize = 5, sizearray = 8, array = 0x18, node = 0x10}}
     local L = KNOWN[1]
     local function isTable(t) return t and t > 0x10000 and rbyte(t + L.tt) == TAG_TABLE end
+
+    detectLayout = function(ms)
+        if _G.__RSC_LAYOUT and _G.__RSC_LAYOUT.array then return _G.__RSC_LAYOUT end
+        local thread = ms and ms.Address and rd(ms.Address + 0x170)
+        local slot = ms and ms.Address and rint(ms.Address + 0x178)
+        if not thread or thread < 0x10000 or not slot or slot < 1 then return nil end
+        local tt
+        for b = 0, 3 do if rbyte(thread + b) == TAG_THREAD then tt = b break end end
+        if not tt then return nil end
+
+        local function arrayOf(reg)
+            for _, so in ipairs({8, 12, 4}) do
+                local size = rint(reg + so)
+                if size and size >= slot and size < 10000000 then
+                    for _, ao in ipairs({0x20, 0x18, 0x28, 0x10}) do
+                        local arr = rd(reg + ao)
+                        if arr and arr > 0x10000 and arr < 0x7fffffffffff and rint(arr + (slot - 1) * 16 + 12) == TAG_TABLE then
+                            local t = rd(arr + (slot - 1) * 16)
+                            if t and t > 0x10000 and rbyte(t + tt) == TAG_TABLE then return t, so, ao end
+                        end
+                    end
+                end
+            end
+        end
+
+        local function nodesOfTable(t)
+            for _, no in ipairs({0x18, 0x20, 0x10, 0x28}) do
+                local base = rd(t + no)
+                if base and base > 0x10000 and base < 0x7fffffffffff then
+                    for _, b in ipairs({tt == 0 and 6 or 4, 4, 6, 5, 7, 3, 2}) do
+                        local l, m = rbyte(t + b), rbyte(t + b + 1)
+                        if l and m and l >= 1 and l <= 24 and m == (2 ^ l - 1) % 256 then
+                            local keys = 0
+                            for i = 0, math.min(2 ^ l, 64) - 1 do
+                                local n = base + i * 32
+                                local kp = rd(n + 16)
+                                if (rint(n + 28) or 0) % 16 == 6 and kp and kp > 0x10000 then
+                                    local ok, k = pcall(mrd, "string", kp + 24)
+                                    if ok and type(k) == "string" and #k > 0 and #k < 64 then keys = keys + 1 end
+                                end
+                            end
+                            if keys > 0 then return no, b end
+                        end
+                    end
+                end
+            end
+        end
+
+        local function tryAt(g, x, y)
+            local reg = rd(g + y)
+            if not reg or reg < 0x10000 or rint(g + y + 12) ~= TAG_TABLE or rbyte(reg + tt) ~= TAG_TABLE then return nil end
+            local t, so, ao = arrayOf(reg)
+            if not t then return nil end
+            local no, lsize = nodesOfTable(t)
+            if not no then return nil end
+            local res = {tt = tt, globalState = x, registry = y, lsize = lsize, sizearray = so, array = ao, node = no}
+            _G.__RSC_LAYOUT = res
+            return res
+        end
+
+        local xs = {0x18, 0x68}
+        for x = 0, 0x100, 8 do xs[#xs + 1] = x end
+        for _, x in ipairs(xs) do
+            local g = rd(thread + x)
+            if g and g > 0x10000 and g < 0x7fffffffffff then
+                local res = tryAt(g, x, 0x620)
+                if res then return res end
+            end
+        end
+        for _, x in ipairs(xs) do
+            local g = rd(thread + x)
+            if g and g > 0x10000 and g < 0x7fffffffffff then
+                for y = 0, 0x1000, 8 do
+                    local res = tryAt(g, x, y)
+                    if res then return res end
+                end
+            end
+        end
+        local fb = KNOWN[tt] or KNOWN[1]
+        _G.__RSC_LAYOUT = fb
+        return fb
+    end
+
     local function moduleTable(ms)
         local thread = ms and ms.Address and rd(ms.Address + 0x170)
         if not thread or thread < 0x10000 then return nil end
         local shared = _G.__RSC_LAYOUT
         if shared and shared.array then
             L = shared
-        elseif rbyte(thread + L.tt) ~= TAG_THREAD then
-            for b = 0, 3 do
-                if rbyte(thread + b) == TAG_THREAD and KNOWN[b] then L = KNOWN[b] break end
-            end
+        else
+            local detected = detectLayout(ms)
+            if detected then L = detected end
         end
         if rbyte(thread + L.tt) ~= TAG_THREAD then return nil end
         local g = rd(thread + L.globalState)
@@ -5270,7 +5461,7 @@ local function upstreamBusy()
     return type(stamp) == "number" and tick() - stamp < 180
 end
 local function changerSource()
-    return BUNDLED_ENGINE, "bundled 3.5.4"
+    return BUNDLED_ENGINE, "bundled 3.6"
 end
 local compiledChanger
 local function apply()
@@ -5342,8 +5533,10 @@ local function equipSoundStrings()
     local ms = modules and modules:FindFirstChild("SoundLibrary")
     local thread = ms and rdq(ms.Address + 0x170)
     -- The layout the changer found; without it, one of the two known builds,
-    -- told apart by where the thread's type byte (10) sits.
     local lay = _G.__RSC_LAYOUT
+    if not lay or not lay.array then
+        if detectLayout and ms then lay = detectLayout(ms) end
+    end
     if not lay or not lay.array then
         local okB, b0 = pcall(memory_read, "byte", thread or 0)
         lay = (okB and b0 == 10) and {globalState = 0x18, registry = 0x620, lsize = 5, sizearray = 8, array = 0x18, node = 0x10}
@@ -6598,9 +6791,9 @@ local DRAW = {Skins = drawSkins, Cosmetics = drawCosmetics, Visuals = drawVisual
     Settings = drawSettings}
 DRAW.Updates = function(x,y,w,h)
     rect(x,y,w,h,C.panel,2,8)
-    text("Update log / 3.5.4 / October 12, 2026",x+20,y+20,C.text,18,5,true)
-    local entries={"Paced image decoding; stale queued artwork skipped.",
-        "Wider scrollbars; drag or use arrow/Page keys.",
+    text("Update log / 3.6 / October 14, 2026",x+20,y+20,C.text,18,5,true)
+    local entries={"Updated inventory and sound memory-layout detection.",
+        "Dynamic offsets, saved fallback and live validation.",
         "Unavailable community skies disabled to prevent crashes.",
         "420px skin artwork where supplied; corner resizing.",
         "Bundled engine; guarded memory access during transitions.",

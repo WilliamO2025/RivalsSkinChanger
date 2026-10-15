@@ -1,4 +1,4 @@
-# Rivals Skin Changer 3.5.4
+# Rivals Skin Changer 3.6
 
 Hybrid of Martini's FULLMATCHA GUI/engine and our loader improvements. Open with:
 
@@ -68,3 +68,6 @@ New textures decode at most once per redraw, at least 80ms apart, and pause duri
 
 ## October 13 — automatic update launcher
 Autoexec requests this repository’s main-branch GUI on every join with a fresh request parameter, retries download failures up to three times and logs the loaded version. It never falls back to an old local GUI. A running GUI is not replaced mid-match; updates load on the next join. Network/service failures can still prevent loading.
+
+## October 14 — upstream compatibility fixes 3.6
+Integrated FULLMATCHA revision 938e0aa72db6ee42d6bf9637ac42d9f74efe693e. GUI inventory and sound lookups now detect memory layouts dynamically. The engine fetches offsets from offsets.imtheo.lol/Offsets.json, retains a local last-good JSON fallback, and checks core Instance offsets against the running game. Updated sky, sound, display-name, lighting and mesh offsets follow the new lookup. Existing GUI, artwork pacing, performance changes and fresh-main autoexec remain. Validation uses isolated mocks, not live Roblox memory.

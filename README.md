@@ -1,4 +1,4 @@
-# Rivals Skin Changer 3.6.1
+# Rivals Skin Changer 3.7
 
 Hybrid of Martini's FULLMATCHA GUI/engine and our loader improvements. Open with:
 
@@ -74,3 +74,6 @@ Integrated FULLMATCHA revision 938e0aa72db6ee42d6bf9637ac42d9f74efe693e. GUI inv
 
 ## October 14 — startup lifecycle fix 3.6.1
 Auto-apply waits for a stable context, catches polling/file errors and marks completion only after a confirmed apply. Failed attempts remain available for manual retry rather than repeatedly mutating memory. Apply errors open the GUI with a message; renderer stop reasons are logged. A non-Rivals ID must persist for five seconds while loaded before closing the GUI. Session-memory guards now use catchable assertions even on hosts where error() only logs. These changes cannot preserve a runtime that Matcha itself terminates.
+
+## October 16 — upstream fixes 3.7
+Merged FULLMATCHA 40034f0486fef3ea221bf57e37713c3247ae0d6e. Offset selection checks the running build and keeps versioned caches. Engine and GUI support separated table-mask bytes. Sky changes target map templates, restore prior faces and reject incompatible IDs; upstream re-enables community skies and removes Classic. Lighting, sound-volume and display-name writes gain validation, including Unicode name restoration. Our GUI pacing, lifecycle fixes and latest-main launcher remain. Mock tests pass; map-load compatibility remains unverified in-game.

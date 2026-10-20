@@ -1,4 +1,4 @@
-# Rivals Skin Changer 3.7
+# Rivals Skin Changer 3.8
 
 Hybrid of Martini's FULLMATCHA GUI/engine and our loader improvements. Open with:
 
@@ -77,3 +77,13 @@ Auto-apply waits for a stable context, catches polling/file errors and marks com
 
 ## October 16 — upstream fixes 3.7
 Merged FULLMATCHA 40034f0486fef3ea221bf57e37713c3247ae0d6e. Offset selection checks the running build and keeps versioned caches. Engine and GUI support separated table-mask bytes. Sky changes target map templates, restore prior faces and reject incompatible IDs; upstream re-enables community skies and removes Classic. Lighting, sound-volume and display-name writes gain validation, including Unicode name restoration. Our GUI pacing, lifecycle fixes and latest-main launcher remain. Mock tests pass; map-load compatibility remains unverified in-game.
+
+## October 20 — upstream merge 3.8
+
+Merged FULLMATCHA `3fd1242f17ef4c940ce16156a43a4e5423dcf330`: shallow asset counting, learned per-build memory-layout caching and loading retries, name reference-count fixes, switch-mode/script and scope fixes, delayed tracer retries, new skin icons, health-bar and button colors, profile-card controls, and console health summaries.
+
+Save & Apply now immediately hides drawings and releases game input before compiling/loading. An identical config is skipped after a clean successful apply in the same server; auxiliary wrap files are included in the comparison. Changed configs still use upstream's full restore/apply cycle, because weapons can share swapped script folders. Per-weapon incremental application is not implemented. The unfinished experimental delta patch is not bundled.
+
+Wheel input is still not supported by this Matcha Drawing menu. Drag the list or scrollbar, or point at it and use arrows/Page Up/Page Down. Upstream documents the same limitation. The menu is not guaranteed to stay responsive during synchronous host calls, and loading is not instant.
+
+All six Misc pages, Apply hiding/no-op/retry behavior, asset counting, name reference-count handling, saved-layout retry, existing GUI performance/lifecycle, offset/layout tests and autoexec tests pass in isolated mocks. Live Roblox behavior and timing remain unverified. Rejoin to fetch 3.8 with the existing autoexec launcher; no Matcha files were changed.

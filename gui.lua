@@ -1,4 +1,4 @@
--- Rivals Skin Changer 3.9; upstream Martini; see UPSTREAM.md for credits.
+-- Rivals Skin Changer 3.9.1; upstream Martini; see UPSTREAM.md for credits.
 
 -- Upgrade from our 2.x GUI. Only our own state and preferences are consulted.
 local old = _G.__RIVALS_SKIN_GUI
@@ -8913,7 +8913,8 @@ local function drawSettings(x, y, w, h)
     cy = cy + 40
     text("Reload script", cx, cy + 6, C.text, 14, 5, true)
     text("Saves selections and restarts with the latest version.", cx, cy + 24, C.faint, 11, 5)
-    if button(x + w - 200, cy, 180, 30, "Reload script", false, shared.busy or upstreamBusy()) then
+    local reloadLabel = state.reloadQueued and "Waiting for apply..." or "Reload script"
+    if button(x + w - 200, cy, 180, 30, reloadLabel, false, state.reloadQueued or state.reloadDownloading) then
         if reloadScript then reloadScript() end
     end
     cy = cy + 44
@@ -8931,14 +8932,14 @@ local DRAW = {Skins = drawSkins, Cosmetics = drawCosmetics, Visuals = drawVisual
     Settings = drawSettings}
 DRAW.Updates = function(x,y,w,h)
     rect(x,y,w,h,C.panel,2,8)
-    text("Update log / 3.9 / October 21, 2026",x+20,y+20,C.text,18,5,true)
+    text("Update log / 3.9.1 / October 21, 2026",x+20,y+20,C.text,18,5,true)
     local entries={"Faster joins: smaller asset scans and layout-loading retries.",
         "Apply updates changed weapons/settings; Default restores their originals.",
         "Upstream name-count, scope, tracer, and profile-card fixes.",
         "420px skin artwork where supplied; corner resizing.",
         "Bundled engine; guarded memory access during transitions.",
         "Autoexec settings and first-run notice from upstream.",
-        "Reload script below Unload fetches the latest version."}
+        "Reload stays clickable during Apply and waits before restarting."}
     for i,lineText in ipairs(entries) do text(lineText,x+20,y+62+i*29,C.dim,13,5) end
 end
 local function viewport()
@@ -9199,8 +9200,16 @@ local function stop(reason)
     if type(setrobloxinput) == "function" then pcall(setrobloxinput, true) end
 end
 reloadScript = function()
-    if shared.busy or upstreamBusy() then return end
+    if state.reloadDownloading or state.reloadReady then return end
+    if shared.busy or upstreamBusy() then
+        state.reloadQueued = true
+        state.status = "Reload queued; waiting for the current operation to finish."
+        return
+    end
+    state.reloadQueued = false
+    state.reloadDownloading = true
     job("Downloading latest script...", function()
+        local okReload, reloadError = pcall(function()
         saveConfig()
         saveSettings()
         local source
@@ -9220,6 +9229,9 @@ reloadScript = function()
         -- Do not tear down from inside drawWindow: finish its current frame first.
         state.reloadReady = fn
         state.status = "Restarting script..."
+        end)
+        state.reloadDownloading = false
+        assert(okReload, reloadError)
     end)
 end
 -- What is on screen right now, as text: for checking the layout from a script.
@@ -9306,8 +9318,9 @@ task.spawn(function()
             lastError = tostring(err)
             print("[Rivals GUI] " .. lastError)
         end
-        if state.reloadReady then stopReason="Reload script";break end
         if state.unload then stopReason="Unload button";break end
+        if state.reloadQueued and not shared.busy and not upstreamBusy() then reloadScript() end
+        if state.reloadReady then stopReason="Reload script";break end
         task.wait(.016)
     end
     stop(stopReason or "GUI session replaced")

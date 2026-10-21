@@ -1,4 +1,4 @@
--- Rivals Skin Changer 3.8; upstream Martini; see UPSTREAM.md for credits.
+-- Rivals Skin Changer 3.9; upstream Martini; see UPSTREAM.md for credits.
 
 -- Upgrade from our 2.x GUI. Only our own state and preferences are consulted.
 local old = _G.__RIVALS_SKIN_GUI
@@ -1431,6 +1431,7 @@ local function findSkinModel(skinName)
 end
 
 -- Memory swap
+local Delta = {reserved = {}, extra = {}, dataSlots = {}}
 local memoryRestores = {}
 local renamedScripts = {}
 local floatRestores = {}
@@ -1479,7 +1480,7 @@ local function copyName(target, nameSource)
         end
         local counted = pcall(mwr, "int", name + 48, count + 1)
         if not counted then return false end
-        table.insert(nameCopies, {slot, orig})
+        table.insert(nameCopies, {slot, orig, group = Delta.group})
         wr(slot, name)
     end
     return true
@@ -1544,6 +1545,7 @@ local function swapTwoWay(instA, instB, parentFolder)
     local origSkinCtrl = slotB and rd(slotB + 8)
 
     table.insert(memoryRestores, {
+        group = Delta.group,
         defSlot = slotA,
         skinSlot = slotB,
         origDefInst = a,
@@ -2671,6 +2673,15 @@ end
 local VM_FIELDS = {Animations = true, RootPartOffset = true, Image = true, ImageHighResolution = true}
 local WRAP_FIELDS = {WrapGroups = true}
 
+function Delta.write(slot, value)
+    if not Delta.dataSlots[slot] then
+        local original = rd(slot)
+        assert(original ~= nil, "Could not read original cosmetic data")
+        nameCopies[#nameCopies + 1] = {slot, original, group = Delta.group, data = true}
+        Delta.dataSlots[slot] = true
+    end
+    mwr("uintptr_t", slot, value)
+end
 -- Animations, offsets, icons, wraps
 local function syncSkinData(pairList, wrapPairs, cache)
     if #pairList == 0 and #wrapPairs == 0 then return 0 end
@@ -2694,12 +2705,13 @@ local function syncSkinData(pairList, wrapPairs, cache)
 
     local synced, missed = 0, {}
     for _, p in ipairs(pairList) do
+        Delta.group = p.group
         local d, k = viewModelSlots(p[1]), viewModelSlots(p[2])
         local vals = k and {rd(k[1]), rd(k[2]), k[3] and rd(k[3]), k[4] and rd(k[4])}
         if d and vals and vals[1] and vals[2] and vals[1] ~= 0 and vals[2] ~= 0 then
 
             for j = 1, 4 do
-                if d[j] and vals[j] and vals[j] ~= 0 then wr(d[j], vals[j]) end
+                if d[j] and vals[j] and vals[j] ~= 0 then Delta.write(d[j], vals[j]) end
             end
             synced = synced + 1
         else
@@ -2717,7 +2729,8 @@ local function syncSkinData(pairList, wrapPairs, cache)
         local ownedSlot, targetSlot = wrapGroupsSlot(p[1]), wrapGroupsSlot(p[2])
         local targetGroups = targetSlot and rd(targetSlot)
         if ownedSlot and targetGroups and targetGroups ~= 0 and ownedSlot ~= targetSlot then
-            wr(ownedSlot, targetGroups)
+            Delta.group = "wrap:" .. p[1]
+            Delta.write(ownedSlot, targetGroups)
             wrapsApplied = wrapsApplied + 1
         else
             wrapsMissed[#wrapsMissed + 1] = p[1] .. "=" .. p[2]
@@ -2729,6 +2742,11 @@ end
 
 -- Skin swaps
 local function applySkinSwapper()
+    skinDataPairs, renamedScripts = {}, {}
+    configWrapPairs, configFinishers, configCharms = {}, {}, {}
+    configSkybox, configSounds, configSpoof = {}, {}, {}
+    configLighting, configTracers, configNoHands = {}, {}, {}
+    _G.__RSC_HPBAR_CFG, _G.__RSC_BTN_CFG = {}, {}
     if not isfile or not readfile then
         return 0, "Executor does not support isfile/readfile functions."
     end
@@ -2774,7 +2792,8 @@ local function applySkinSwapper()
 
     print("[RivalsSkinChanger] Config: " .. tostring(targetFile)
         .. (_G.__RIVALS_SUPPORT_ID and ("  (ref " .. _G.__RIVALS_SUPPORT_ID .. ")") or ""))
-    local okRead, r2 = pcall(readfile, targetFile)
+    local okRead, r2 = true, Delta.text
+    if not r2 then okRead, r2 = pcall(readfile, targetFile) end
     if not okRead or not r2 then
         return 0, "Failed to read file '" .. tostring(targetFile) .. "'. File may be locked by another application."
     end
@@ -2791,6 +2810,7 @@ local function applySkinSwapper()
         return 0, "Game assets folder (ViewModels.Weapons) is not loaded yet. Are you in a match or shooting range?"
     end
 
+    Delta.text = r2
     local parsedPairs = 0
     local nonDefaultPairs = 0
     local missingBaseWeapons = {}
@@ -2800,12 +2820,15 @@ local function applySkinSwapper()
     local vmMods = LP:FindFirstChild("PlayerScripts")
     vmMods = vmMods and vmMods:FindFirstChild("Modules")
     vmMods = vmMods and vmMods:FindFirstChild("ViewModels")
+    vmMods = Delta.vmLive or vmMods
+    Delta.vmLive = vmMods
     _G.__RSC_VMS_LIVE = vmMods
 
     -- Family scripts by their real names, before any line trades them.
-    local vmOrder = vmMods and vmMods:GetChildren() or {}
-    local vmFamilies = {}
-    for _, c in ipairs(vmOrder) do vmFamilies[c.Name] = c end
+    local vmOrder = Delta.vmOrder or (vmMods and vmMods:GetChildren() or {})
+    local vmFamilies = Delta.vmFamilies or {}
+    if not Delta.vmFamilies then for _, c in ipairs(vmOrder) do vmFamilies[c.Name] = c end end
+    Delta.vmOrder, Delta.vmFamilies = vmOrder, vmFamilies
 
     -- The game picks a viewmodel script with ViewModels:FindFirstChild(name, true).
     -- On Energy Rifle, Sniper, Freeze Ray and the like the family script is both
@@ -2833,13 +2856,17 @@ local function applySkinSwapper()
                 spares[host] = {}
                 local default = host.Name:gsub("^Base", "")
                 for _, c in ipairs(host:GetChildren()) do
-                    if c.ClassName == "ModuleScript" and c.Name ~= default and not inConfig[c.Name] then
+                    if c.ClassName == "ModuleScript" and c.Name ~= default and not inConfig[c.Name] and not Delta.reserved[c.Address] then
                         table.insert(spares[host], c)
                     end
                 end
             end
             local spare = table.remove(spares[host], 1)
             if spare then
+                Delta.reserved[spare.Address] = Delta.group
+                local names = Delta.extra[Delta.group] or {}
+                Delta.extra[Delta.group] = names
+                names[spare.Name] = true
                 -- Names first, so the swap leaves each with the right one; the
                 -- next run then undoes the swap before the names.
                 return (copyName(sm, spare) and copyName(spare, fam) and swapTwoWay(sm, spare, host)) and true or false
@@ -2910,7 +2937,16 @@ local function applySkinSwapper()
     local inConfig = {}
     for _, j in ipairs(jobs) do inConfig[j[1]], inConfig[j[2]], inConfig[j[3]] = true, true, true end
 
+    if Delta.changed then
+        for _, j in ipairs(jobs) do
+            if not Delta.changed["skin:" .. j[1]] and j[2]:lower() ~= "default" and j[2]:lower() ~= "standard" then
+                touched[j[2]], touched[j[3]] = j[3] .. " -> " .. j[2], j[3] .. " -> " .. j[2]
+            end
+        end
+    end
     for _, job in ipairs(jobs) do
+        Delta.group = "skin:" .. job[1]
+        if not Delta.changed or Delta.changed[Delta.group] then
         local weaponName, skinTarget, srcName = job[1], job[2], job[3]
         local ownedSwap = srcName ~= weaponName
         parsedPairs = parsedPairs + 1
@@ -2985,7 +3021,7 @@ local function applySkinSwapper()
                                 table.insert(skippedNoScript, weaponName .. "=" .. skinTarget)
                             elseif swapTwoWay(defModel, skinModel, wf) then
                                 swappedCount = swappedCount + 1
-                                table.insert(skinDataPairs, {srcName, skinTarget})
+                                table.insert(skinDataPairs, {srcName, skinTarget, group = Delta.group})
                                 if defMod and skinMod then
                                     scriptMoved = swapTwoWay(defMod, skinMod, baseMod) and true or false
                                 elseif ownedSwap then
@@ -3095,13 +3131,17 @@ local function applySkinSwapper()
         end
     end
 
-    if familiesRenamed then
+    end -- changed weapon jobs only
+    Delta.group = "shared-script-folder"
+    if familiesRenamed and not Delta.vmSwapped then
         local cleanVm = cleanVmParent and cleanVmParent:FindFirstChild("ViewModels")
-        if not (cleanVm and vmMods and swapTwoWay(vmMods, cleanVm, nil)) then
+        Delta.vmSwapped = cleanVm and vmMods and swapTwoWay(vmMods, cleanVm, nil) or false
+        if not Delta.vmSwapped then
             print("[RivalsSkinChanger] Couldn't set up the switch-mode scripts for " .. "Sniper / Energy Rifle / Freeze Ray skins - they keep the default effects")
         end
     end
 
+    Delta.group = nil
     pcall(applySoundCallbacks)
 
     if swappedCount == 0 then
@@ -4701,7 +4741,18 @@ local function lightingColor(v)
     if n then return n, n, n end
 end
 
+function Delta.lightWrite(kind, address, value)
+    Delta.lightUndo = Delta.lightUndo or {}
+    local key = kind .. ":" .. tostring(address)
+    if not Delta.lightUndo[key] then
+        local old = mrd(kind, address)
+        assert(old ~= nil, "Could not read original lighting field")
+        Delta.lightUndo[key] = {kind, address, old}
+    end
+    mwr(kind, address, value)
+end
 local function applyLighting(conf, cache)
+    local function mwr(kind, address, value) Delta.lightWrite(kind, address, value) end
     local values = {}
     local name = conf.preset and tostring(conf.preset):lower()
     if name == "match" then
@@ -4881,6 +4932,7 @@ _G.__RSC_SKY_COLORS = function()
 end
 
 local wrapPairs = readWrapPairs()
+Delta.sync = function(wrapPairs)
 if ENABLE_SKIN_DATA_SYNC and (#skinDataPairs > 0 or #wrapPairs > 0) then
     print("[RivalsSkinChanger] Applying skin animations, offsets, icons" .. (#wrapPairs > 0 and " + wraps" or "") .. "...")
     local tSync = tick()
@@ -4935,6 +4987,8 @@ if ENABLE_SKIN_DATA_SYNC and (#skinDataPairs > 0 or #wrapPairs > 0) then
         notifyUser("Rivals Skin Changer", "Animation sync failed - skins are still swapped", 6)
     end
 end
+end
+Delta.sync(wrapPairs)
 local function applyPostEffects()
     local okSky, patched, skyNote, skyRefused = pcall(applySkybox, configSkybox)
     if okSky and (patched or 0) > 0 then
@@ -5404,7 +5458,7 @@ local function showOnlyVariant(model, keepName)
                     local addr = d.Address + OFF.Transparency
                     local okR, old = pcall(mrd, "float", addr)
                     if okR and old then
-                        floatRestores[#floatRestores + 1] = {addr, old}
+                        floatRestores[#floatRestores + 1] = {addr, old, group = Delta.group}
                         pcall(mwr, "float", addr, 1)
                     end
                 end
@@ -5432,7 +5486,16 @@ local function applyCosmetics()
         used[kind .. a], used[kind .. b] = a .. " -> " .. b, a .. " -> " .. b
         return true
     end
+    if Delta.changed then
+        for _, row in ipairs({{configFinishers, "finisher:", "f:"}, {configCharms, "charm:", "c:"}}) do
+            for _, p in ipairs(row[1]) do
+                if not Delta.changed[row[2] .. p[1]] then claim(row[3], p[1], p[2]) end
+            end
+        end
+    end
     for _, p in ipairs(configFinishers) do
+        Delta.group = "finisher:" .. p[1]
+        if not Delta.changed or Delta.changed[Delta.group] then
         local owned, target = p[1], p[2]
         local a, b
         for _ = 1, 20 do
@@ -5451,7 +5514,10 @@ local function applyCosmetics()
             missed[#missed + 1] = owned .. "=" .. target .. " (swap failed)"
         end
     end
+    end -- changed finishers
     for _, p in ipairs(configCharms) do
+        Delta.group = "charm:" .. p[1]
+        if not Delta.changed or Delta.changed[Delta.group] then
         local owned, target = p[1], p[2]
         -- Charm models (the unreleased seasons especially) can still be
         -- streaming in when autoexec starts the script: look again for up to 10s.
@@ -5488,6 +5554,8 @@ local function applyCosmetics()
             missed[#missed + 1] = owned .. "=" .. target .. " (swap failed)"
         end
     end
+    end -- changed charms
+    Delta.group = nil
     return done, missed, dupes
 end
 
@@ -5519,7 +5587,7 @@ end
 -- Hardcore Parkour progress bar (its reference count raised, so neither
 -- frame frees it). Its stops are then recoloured every frame. While it's
 -- linked, that mode's progress bar shows the same colours.
-pcall(function()
+Delta.health = function()
     local conf = {}
     for k, v in pairs(_G.__RSC_HPBAR_CFG or {}) do conf[k] = tostring(v) end
     local style = (conf.style or ""):lower()
@@ -5817,7 +5885,8 @@ pcall(function()
     end)
     _G.__RSC_HPBAR_CONN = conn
     print("[RivalsSkinChanger] Health bar: " .. (conf.label or style) .. (bar and "" or ", once the bar shows up") .. " - only you see it")
-end)
+end
+pcall(Delta.health)
 
 -- Scope setups. Mouse.Scope._Setup picks a scope by the viewmodel's name:
 -- "Pixel Sniper" (pixel images, pixelated scaling, square dot), "Keyper"
@@ -5830,7 +5899,7 @@ end)
 -- is set to the game's own string (a key in ItemLibrary.ViewModels). The
 -- scope is set up when your loadout's UI is built, so it shows from your
 -- next respawn.
-pcall(function()
+Delta.scopes = function()
     local function tstr(p)
         if not p or p < 0x10000 then return nil end
         local okL, len = pcall(mrd, "int", p + 20)
@@ -5914,7 +5983,8 @@ pcall(function()
         table.sort(done)
         print("[RivalsSkinChanger] Scopes: " .. table.concat(done, ", ") .. " - from your next respawn")
     end
-end)
+end
+pcall(Delta.scopes)
 
 -- Buttons: the menu's coloured buttons (green Play and prices, blue View,
 -- yellow and gold) get their shine from a UIGradient with a fixed set of
@@ -5926,7 +5996,7 @@ end)
 -- button's gradient once, so later changes to it never show (unlike the
 -- health bar's). Only gradients found alive in this run's scan are written:
 -- the game frees UI it rebuilds, and writing into freed memory crashes Roblox.
-pcall(function()
+Delta.buttons = function()
     local conf = {}
     for k, v in pairs(_G.__RSC_BTN_CFG or {}) do conf[k] = tostring(v):lower() end
     local job = game.JobId
@@ -6037,7 +6107,8 @@ pcall(function()
         if count[style] then parts[#parts + 1] = style .. " " .. count[style] end
     end
     print("[RivalsSkinChanger] Buttons: recoloured " .. (#parts > 0 and table.concat(parts, ", ") or "none (no matching buttons found)") .. " - only you see it")
-end)
+end
+pcall(Delta.buttons)
 
 -- Save state
 _G.__RIVALS_SKIN_CHANGER_STATE ={restores = memoryRestores, wfAddr = wf.Address, jobId = game.JobId, nameCopies = nameCopies, dicts = dictCache, floats = floatRestores}
@@ -6056,6 +6127,240 @@ pcall(function()
     print("[RivalsSkinChanger] Health: " .. #probs .. " problem" .. (#probs == 1 and "" or "s") .. " (" .. secs .. ") - " .. table.concat(short, " | "))
     notifyUser("Rivals Skin Changer", #probs .. " problem" .. (#probs == 1 and "" or "s") .. " - see the Health line in the console", 8)
 end)
+
+-- Incremental apply, bound to this engine's live session and undo records.
+-- No saved process pointers are used across jobs or asset-folder replacements.
+function Delta.snapshot(text)
+    local result = {groups = {}, names = {}, values = {}, wraps = {}}
+    local section = "skins"
+    local function add(group, line, names)
+        result.groups[group] = (result.groups[group] or "") .. line .. "\n"
+        local set = result.names[group] or {}
+        result.names[group] = set
+        for _, name in ipairs(names or {}) do set[name] = true end
+    end
+    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+        local h = line:gsub("\r", ""):match("^%s*%[%s*(.-)%s*%]%s*$")
+        if h then
+            h = h:lower()
+            section = h:find("health") and "healthbar" or h:find("button") and "buttons"
+                or h:find("wrap") and "wraps" or h:find("sky") and "skybox"
+                or h:find("light") and "lighting" or h:find("finisher") and "finishers"
+                or h:find("charm") and "charms" or h:find("sound") and "sounds"
+                or h:find("spoof") and "spoof" or h:find("tracer") and "tracers"
+                or h:find("hand") and "nohands" or h:find("skin") and "skins" or "other"
+        elseif section ~= "other" then
+            local key, value = parseConfigLine(line)
+            if section == "skins" then
+                local weapon, owned, target = parseSkinSwapLine(line)
+                if key and value and value:lower() ~= "default" and value:lower() ~= "standard" then
+                    add("skin:" .. key, key .. "=" .. value, {"skin:" .. key, "skin:" .. value})
+                elseif weapon then
+                    add("skin:" .. weapon, weapon .. "|" .. owned .. ">" .. target, {"skin:" .. owned, "skin:" .. target})
+                end
+            elseif key and value then
+                if section == "wraps" then
+                    if result.wraps[key] == nil then result.wraps[key] = value end
+                elseif section == "finishers" or section == "charms" then
+                    local kind = section == "finishers" and "finisher:" or "charm:"
+                    if key ~= value then add(kind .. key, key .. "=" .. value, {kind .. key, kind .. value}) end
+                else
+                    local values = result.values[section] or {}
+                    result.values[section] = values
+                    values[key:lower()] = value
+                end
+            end
+        end
+    end
+    -- Same precedence as readWrapPairs: config, then the first auxiliary file.
+    for _, path in ipairs({"rivals_wraps.lua", "rivals_wraps.txt", "workspace/rivals_wraps.lua", "workspace/rivals_wraps.txt"}) do
+        if isfile(path) then
+            local body = readfile(path)
+            for line in body:gmatch("[^\r\n]+") do
+                local key, value = line:match("^%s*([^=%-][^=]-)%s*=%s*(.-)%s*$")
+                if key and value ~= "" and result.wraps[key] == nil then result.wraps[key] = value end
+            end
+            break
+        end
+    end
+    for key, value in pairs(result.wraps) do
+        if key ~= value then add("wrap:" .. key, value, {"wrap:" .. key, "wrap:" .. value}) end
+    end
+    for name, values in pairs(result.values) do
+        local lines = {}
+        for k, v in pairs(values) do lines[#lines + 1] = k .. "=" .. v end
+        table.sort(lines)
+        result.groups[name] = table.concat(lines, "\n")
+    end
+    return result
+end
+
+function Delta.plan(nextState)
+    local changed, owners = {}, {}
+    for k, v in pairs(Delta.last.groups) do if nextState.groups[k] ~= v then changed[k] = true end end
+    for k, v in pairs(nextState.groups) do if Delta.last.groups[k] ~= v then changed[k] = true end end
+    for k in pairs(Delta.pending or {}) do changed[k] = true end
+    local function own(node, group)
+        if not group or group == "shared-script-folder" then return end
+        owners[node] = owners[node] or {}
+        owners[node][group] = true
+    end
+    for _, snapshot in ipairs({Delta.last, nextState}) do
+        for group, names in pairs(snapshot.names) do for name in pairs(names) do own(name, group) end end
+    end
+    for group, names in pairs(Delta.extra) do for name in pairs(names) do own("skin:" .. name, group) end end
+    for _, record in ipairs(memoryRestores) do
+        own(record.defAddr, record.group); own(record.skinAddr, record.group)
+    end
+    for _, record in ipairs(nameCopies) do own(record[1], record.group) end
+    -- Connected swaps must be undone together, in reverse write order.
+    local more = true
+    while more do
+        more = false
+        for _, groups in pairs(owners) do
+            local affected = false
+            for group in pairs(groups) do if changed[group] then affected = true break end end
+            if affected then
+                for group in pairs(groups) do if not changed[group] then changed[group], more = true, true end end
+            end
+        end
+    end
+    return changed
+end
+
+function Delta.restore(changed)
+    for i = #memoryRestores, 1, -1 do
+        local r = memoryRestores[i]
+        if r.group and changed[r.group] then
+            if r.defSlot and r.origDefInst then wr(r.defSlot, r.origDefInst); if r.origDefCtrl then wr(r.defSlot + 8, r.origDefCtrl) end end
+            if r.skinSlot and r.origSkinInst then wr(r.skinSlot, r.origSkinInst); if r.origSkinCtrl then wr(r.skinSlot + 8, r.origSkinCtrl) end end
+            if r.defAddr and r.origDefNC then wr(r.defAddr + OFF.NameContainer, r.origDefNC) end
+            if r.skinAddr and r.origSkinNC then wr(r.skinAddr + OFF.NameContainer, r.origSkinNC) end
+            if r.defAddr and r.origDefParent then wr(r.defAddr + OFF.Parent, r.origDefParent) end
+            if r.skinAddr and r.origSkinParent then wr(r.skinAddr + OFF.Parent, r.origSkinParent) end
+            table.remove(memoryRestores, i)
+        end
+    end
+    for i = #nameCopies, 1, -1 do
+        local r = nameCopies[i]
+        if r.group and changed[r.group] then
+            wr(r[1], r[2])
+            if r.data then Delta.dataSlots[r[1]] = nil end
+            table.remove(nameCopies, i)
+        end
+    end
+    for i = #floatRestores, 1, -1 do
+        local r = floatRestores[i]
+        if r.group and changed[r.group] then mwr("float", r[1], r[2]); table.remove(floatRestores, i) end
+    end
+    for address, group in pairs(Delta.reserved) do if changed[group] then Delta.reserved[address] = nil end end
+    for group in pairs(changed) do
+        Delta.extra[group] = nil
+        local weapon = group:match("^skin:(.*)")
+        if weapon then ACTIVE_CONFIG_SKINS[weapon], scopeSkins[weapon] = nil, nil end
+    end
+end
+
+-- This state owns the captured helpers and is replaced on a full engine start.
+do
+    local owner = _G.__RIVALS_SKIN_CHANGER_STATE
+    local jobId, gameAddress = game.JobId, game.Address
+    owner.deltaVersion = "3.9"
+    Delta.last = Delta.snapshot(Delta.text or "")
+    if #(_G.__RSC_PROBLEMS or {}) > 0 then
+        Delta.pending = {}
+        for k in pairs(Delta.last.groups) do Delta.pending[k] = true end
+    end
+    owner.applyChanges = function(text)
+        assert(_G.__RIVALS_SKIN_CHANGER_STATE == owner and game.JobId == jobId and game.Address == gameAddress,
+            "Server changed; wait for auto-apply in the new server.")
+        mrd("int", game.Address) -- existing guard also verifies the live Weapons folder
+        assert(not _G.__RIVALS_SKIN_CHANGER_BUSY, "Another apply is running.")
+        local nextState = Delta.snapshot(text)
+        local changed = Delta.plan(nextState)
+        if not next(changed) then return "No changes to apply." end
+        local names, skinChanged, cosmeticsChanged, scopeChanged = {}, false, false, false
+        for group in pairs(changed) do
+            names[#names + 1] = group
+            local weapon = group:match("^skin:(.*)")
+            if weapon then skinChanged = true; if SCOPE_RETICLES[weapon] then scopeChanged = true end end
+            if group:match("^finisher:") or group:match("^charm:") then cosmeticsChanged = true end
+        end
+        table.sort(names)
+        print("[RivalsSkinChanger] Applying changes only: " .. table.concat(names, ", "))
+        Delta.pending, Delta.changed = changed, changed
+        _G.__RIVALS_SKIN_CHANGER_BUSY = tick()
+        _G.__RSC_PROBLEMS = {}
+        local previousWr, previousMwr = wr, mwr
+        Delta.writeError = nil
+        mwr = function(kind, address, value)
+            local success, result = pcall(previousMwr, kind, address, value)
+            if not success then Delta.writeError = result end
+            assert(success, result)
+            return result
+        end
+        wr = function(address, value) mwr("uintptr_t", address, value) end
+        local ok, err = pcall(function()
+            Delta.restore(changed)
+            local refused = configSkybox.__refused
+            Delta.text = text
+            local count, why = applySkinSwapper() -- parses all settings, swaps only changed weapons
+            local wantedSkin = false
+            for k in pairs(changed) do if k:match("^skin:") and nextState.groups[k] then wantedSkin = true break end end
+            if wantedSkin and count == 0 and why and not why:find("set to Default", 1, true)
+                and not why:find("no valid Weapon=Skin", 1, true) then assert(false, why) end
+            if not changed.skybox then configSkybox.__refused = refused end
+            wrapPairs = readWrapPairs()
+            local deltaWraps = {}
+            for _, p in ipairs(wrapPairs) do
+                if changed["wrap:" .. p[1]] and p[1] ~= p[2] then deltaWraps[#deltaWraps + 1] = p end
+            end
+            Delta.sync(deltaWraps)
+            if cosmeticsChanged then
+                local done, missed = applyCosmetics()
+                assert(not missed or #missed == 0, "Some changed cosmetics are unavailable; retry after they load.")
+            end
+            if changed.skybox then
+                local _, note, rejected = applySkybox(configSkybox)
+                assert(not rejected, note or "Skybox was not applied")
+            end
+            if changed.lighting or (changed.skybox and (configLighting.preset or ""):lower() == "match") then
+                for _, item in pairs(Delta.lightUndo or {}) do mwr(item[1], item[2], item[3]) end
+                Delta.lightUndo = {}
+                applyLighting(configLighting, dictCache)
+            end
+            if changed.sounds then
+                local _, note = applySounds(configSounds)
+                assert(not note, note)
+                startVolumeWatcher(configSounds)
+            end
+            if changed.spoof then startSpoof(configSpoof) end
+            local function uses(values, target)
+                for _, v in pairs(values or {}) do if tostring(v):lower() == target then return true end end
+                return false
+            end
+            local wrapChanged = false
+            for k in pairs(changed) do if k:match("^wrap:") then wrapChanged = true break end end
+            if changed.tracers or (skinChanged and next(configTracers))
+                or (changed.skybox and uses(configTracers, "sky"))
+                or (wrapChanged and uses(configTracers, "wrap")) then applyTracersEffect() end
+            if changed.nohands then applyNoHandsEffect() end
+            if scopeChanged then Delta.scopes() end
+            if changed.healthbar or (changed.skybox and uses(_G.__RSC_HPBAR_CFG, "sky")) then Delta.health() end
+            if changed.buttons or (changed.skybox and uses(_G.__RSC_BTN_CFG, "sky")) then Delta.buttons() end
+            assert(not Delta.writeError, Delta.writeError)
+            assert(#(_G.__RSC_PROBLEMS or {}) == 0, "Some changes did not finish; see console and press Apply to retry.")
+            Delta.last, Delta.pending = nextState, nil
+        end)
+        wr, mwr = previousWr, previousMwr
+        Delta.changed, Delta.group = nil, nil
+        saveUndo() -- preserve all unchanged records plus any partial changed writes
+        _G.__RIVALS_SKIN_CHANGER_BUSY = nil
+        owner.guiCleanApply = ok
+        assert(ok, err)
+        return "Applied " .. #names .. " changed item(s). Re-equip/respawn if needed."
+    end
+end
 
 ]====]
 -- Rivals changer GUI, drawn on screen
@@ -6824,7 +7129,7 @@ local function upstreamBusy()
     return type(stamp) == "number" and tick() - stamp < 180
 end
 local function changerSource()
-    return BUNDLED_ENGINE, "bundled 3.8"
+    return BUNDLED_ENGINE, "bundled 3.9"
 end
 local hideForApply
 local compiledChanger
@@ -6842,11 +7147,22 @@ local function apply()
     end
     local previous = _G.__RIVALS_SKIN_CHANGER_STATE
     if previous and previous.wfAddr == context.wf and previous.jobId == game.JobId
-        and previous.guiConfig == content and previous.guiCleanApply then
+        and previous.deltaVersion == "3.9" and type(previous.applyChanges) == "function" then
+        local ok, message = timedCall("Changed settings apply", previous.applyChanges, configText())
+        assert(ok, message)
+        state.status = message or "Changes applied."
+        _G.__RivalsGuiAutoApplied = context.key
+        return
+    end
+    if previous and previous.wfAddr == context.wf and previous.jobId == game.JobId
+        and previous.deltaVersion == "3.9" and previous.guiConfig == content and previous.guiCleanApply then
         state.status = "No changes to apply."
         return
     end
     state.status = "Applying..."
+    assert(not previous or previous.wfAddr ~= context.wf or previous.jobId ~= game.JobId
+        or previous.deltaVersion == "3.9",
+        "Rejoin once to upgrade from the old engine: its original animation data was not recorded.")
     local source, from = changerSource()
     if not compiledChanger then
         local okCompile, fn, err = timedCall("Engine compilation", loadstring, source)
@@ -7012,9 +7328,11 @@ local function requestImage(path)
                 if shared.busy or upstreamBusy() or ismouse1pressed() or tick()-lastInteraction < .35 then
                     task.wait(.25)
                 else
+                if _G.__RivalsGuiSession ~= guiToken then break end
                 local p = table.remove(imageQueue,1)
                 if state.open and tick()-(images[p].lastWanted or 0) < .75 then
                     local ok, data = timedCall("Artwork fetch/cache", loadImage, p)
+                    if _G.__RivalsGuiSession ~= guiToken then break end
                     images[p].data = ok and data or nil
                     images[p].state = images[p].data and "ok" or "failed"
                 else
@@ -7216,6 +7534,24 @@ end
 
 local mouse, mouseAt = nil, 0
 local M = {x = 0, y = 0, down = false, press = false, release = false, px = 0, py = 0, dragged = false, took = false}
+local wheel = {delta = 0, seen = false}
+do
+    local ok, conn = pcall(function()
+        return game:GetService("UserInputService").InputChanged:Connect(function(input)
+            pcall(function()
+                if tostring(input.UserInputType):match("MouseWheel$") then
+                    wheel.seen = true
+                    if state.open and not shared.busy and _G.__RivalsGuiSession == guiToken
+                        and (not isrbxactive or isrbxactive() ~= false) then
+                        local amount = tonumber(input.Position.Z)
+                        if amount and amount == amount then wheel.delta = math.max(-20, math.min(20, wheel.delta + amount)) end
+                    end
+                end
+            end)
+        end)
+    end)
+    wheel.conn = ok and conn or nil
+end
 local keyState = {}
 local function keyHit(vk)
     local ok, down = pcall(iskeypressed, vk)
@@ -7314,6 +7650,10 @@ local function scroller(id, x, y, w, h, total, visible)
     local maxFirst = math.max(0, total - visible)
     local s = state.scroll[id] or {first = 0}
     state.scroll[id] = s
+    if over(x, y, w + 16, h) and wheel.delta ~= 0 and not M.down then
+        s.first = s.first - wheel.delta * 3
+        wheel.delta = 0
+    end
     if over(x, y, w, h) then
         if keyHit(0x22) or keyHit(0x28) then s.first = s.first + (keyState[0x22] and visible or 1) end
         if keyHit(0x21) or keyHit(0x26) then s.first = s.first - (keyState[0x21] and visible or 1) end
@@ -7324,7 +7664,7 @@ local function scroller(id, x, y, w, h, total, visible)
         local rowH = h / math.max(1, visible)
         s.first = s.grabFirst - math.floor((M.y - s.grab) / rowH + 0.5)
     end
-    s.first = math.max(0, math.min(maxFirst, s.first))
+    s.first = math.floor(math.max(0, math.min(maxFirst, s.first)))
     -- The bar: drag the thumb, or click above or below it to move a page.
     -- (Matcha can't read the mouse wheel.)
     if maxFirst > 0 then
@@ -8511,25 +8851,27 @@ local function supportId()
     end
     return string.format("%04d-%04d", h1 % 10000, h2 % 10000)
 end
+local reloadScript
 local function drawSettings(x, y, w, h)
+    state.wheelStatus = wheel.seen and "Wheel input received" or (wheel.conn and "Wheel: waiting for host events" or "Wheel: unavailable in this Matcha build")
     rect(x, y, w, h, C.panel, 2, 8)
     local cx, cy = x + 20, y + 18
     text("Auto-apply on join", cx, cy + 6, C.text, 14, 5, true)
     text("Applies your saved config by itself once per server.", cx, cy + 26, C.faint, 12, 5)
     local a = segmented(x + w - 200, cy, 180, 30, {"Off", "On"}, state.autoApply and 2 or 1)
     if a then state.autoApply = a == 2; saveSettings() end
-    cy = cy + 50
+    cy = cy + 40
     text("Mouse offset", cx, cy + 6, C.text, 14, 5, true)
     text("If the dot isn't on your cursor, move it until it is: " .. state.mouseOffset .. " px",
         cx, cy + 26, C.faint, 12, 5)
     if button(x + w - 200, cy, 84, 30, "Up") then state.mouseOffset = state.mouseOffset - 2; saveSettings() end
     if button(x + w - 104, cy, 84, 30, "Down") then state.mouseOffset = state.mouseOffset + 2; saveSettings() end
-    cy = cy + 50
+    cy = cy + 40
     text("Reload", cx, cy + 6, C.text, 14, 5, true)
     text("After editing the config elsewhere, or when the site gets new skins.", cx, cy + 26, C.faint, 12, 5)
     if button(x + w - 200, cy, 84, 30, "Lists") then job("Reading lists...", loadCatalog) end
     if button(x + w - 104, cy, 84, 30, "Config") then job("Reading config...", loadConfig) end
-    cy = cy + 50
+    cy = cy + 40
     text("Accent color", cx, cy + 6, C.text, 14, 5, true)
     text("Buttons, highlights and the picked tile.", cx, cy + 26, C.faint, 12, 5)
     for i, hex in ipairs(ACCENTS) do
@@ -8540,7 +8882,7 @@ local function drawSettings(x, y, w, h)
         if hex == state.accent then circle(sx, sy, 14, C.text, 5, false, 2) end
         if clicked(sx - 14, sy - 14, 28, 28) then state.accent = hex; applyAccent(hex); saveSettings() end
     end
-    cy = cy + 50
+    cy = cy + 40
     text("Show / hide key", cx, cy + 6, C.text, 14, 5, true)
     text(state.binding and "Press the key to use. Esc cancels." or "Click, then press the key that shows and hides this window.",
         cx, cy + 26, C.faint, 12, 5)
@@ -8553,33 +8895,33 @@ local function drawSettings(x, y, w, h)
             if okDown and down then state.bindHeld[vk] = true end
         end
     end
-    cy = cy + 50
+    cy = cy + 40
     text("Lists", cx, cy + 6, C.text, 14, 5, true)
     text(inventory and "The \"you own\" lists show only what you own, or everything."
         or "Your inventory couldn't be read - the lists show everything. Try Reload > Lists in a match.", cx, cy + 26, C.faint, 12, 5)
     local o = segmented(x + w - 200, cy, 180, 30, {"Everything", "Owned"}, state.ownedOnly and 2 or 1)
     if o then state.ownedOnly = o == 2; saveSettings() end
-    cy = cy + 50
+    cy = cy + 40
     text("Window on autoexec", cx, cy + 6, C.text, 14, 5, true)
     text("Hidden: it loads quietly and " .. keyName(state.toggleKey) .. " opens it.", cx, cy + 26, C.faint, 12, 5)
     local v = segmented(x + w - 200, cy, 180, 30, {"Hidden", "Shown"}, state.showOnAutoexec and 2 or 1)
     if v then state.showOnAutoexec = v == 2; saveSettings() end
-    cy = cy + 50
+    cy = cy + 40
     text("Unload", cx, cy + 6, C.text, 14, 5, true)
     text("Removes this window until the script runs again.", cx, cy + 26, C.faint, 12, 5)
     if button(x + w - 200, cy, 180, 30, "Unload") then state.unload = true end
-    cy = cy + 58
+    cy = cy + 40
+    text("Reload script", cx, cy + 6, C.text, 14, 5, true)
+    text("Saves selections and restarts with the latest version.", cx, cy + 24, C.faint, 11, 5)
+    if button(x + w - 200, cy, 180, 30, "Reload script", false, shared.busy or upstreamBusy()) then
+        if reloadScript then reloadScript() end
+    end
+    cy = cy + 44
     line(cx, cy, x + w - 20, cy, C.line, 3, 1)
-    text("Skin changer by Martini", cx, cy + 14, C.dim, 13, 5, true)
-    text("mr.vage - Main Contributor for the GUI", cx, cy + 36, C.dim, 12, 5)
-    text("Sorta copied from Gain's external", cx, cy + 56, C.faint, 12, 5)
-    text("dantekarati - Contributor for the idea", cx, cy + 76, C.faint, 12, 5)
-    local rx2 = x + math.floor(w / 2)
-    text("Main testers/supporters: choperr0333 aka @Giounis", rx2, cy + 16, C.faint, 12, 5)
-    text("Site: " .. SITE, rx2, cy + 36, C.faint, 12, 5)
+    text(state.wheelStatus, x + w / 2, cy + 28, C.dim, 11, 5)
+    text("Skin changer by Martini / mr.vage / dantekarati", cx, cy + 10, C.dim, 11, 5)
     state.supportId = state.supportId or supportId() or "unavailable"
-    text("Support ID: " .. state.supportId, rx2, cy + 76, C.dim, 12, 5)
-    text("Gain's Discord: https://discord.gg/RHbxDSe8Z", rx2, cy + 56, C.faint, 12, 5)
+    text("Support ID: " .. state.supportId, cx, cy + 28, C.faint, 11, 5)
 end
 
 -- The window
@@ -8589,14 +8931,14 @@ local DRAW = {Skins = drawSkins, Cosmetics = drawCosmetics, Visuals = drawVisual
     Settings = drawSettings}
 DRAW.Updates = function(x,y,w,h)
     rect(x,y,w,h,C.panel,2,8)
-    text("Update log / 3.8 / October 20, 2026",x+20,y+20,C.text,18,5,true)
+    text("Update log / 3.9 / October 21, 2026",x+20,y+20,C.text,18,5,true)
     local entries={"Faster joins: smaller asset scans and layout-loading retries.",
-        "Apply closes the menu before loading; unchanged clean applies skip.",
+        "Apply updates changed weapons/settings; Default restores their originals.",
         "Upstream name-count, scope, tracer, and profile-card fixes.",
         "420px skin artwork where supplied; corner resizing.",
         "Bundled engine; guarded memory access during transitions.",
         "Autoexec settings and first-run notice from upstream.",
-        "Existing autoexec launcher loads this update on next join."}
+        "Reload script below Unload fetches the latest version."}
     for i,lineText in ipairs(entries) do text(lineText,x+20,y+62+i*29,C.dim,13,5) end
 end
 local function viewport()
@@ -8771,6 +9113,7 @@ local OPEN_SECONDS, CLOSE_SECONDS, SLIDE = 0.3, 0.22, 48
 local shown, lastFrame = 0, nil
 hideForApply = function()
     state.open, shown = false, 0
+    wheel.delta = 0
     focus, state.binding, grabbed, resizing = nil, false, nil, nil
     beginFrame()
     endFrame()
@@ -8792,6 +9135,7 @@ local function frame()
     elseif keyHit(state.toggleKey) then
         state.open = not state.open; focus = nil
     end
+    if not state.open then wheel.delta = 0 end
     local grab = state.open and (not isrbxactive or isrbxactive() ~= false)
     if grab ~= lastInputGrab and type(setrobloxinput) == "function" then
         local ok = pcall(setrobloxinput, not grab)
@@ -8820,7 +9164,7 @@ local function frame()
             if iskeypressed(vk) then keyboard=true;break end
         end
     end
-    local redraw=signature~=paintKey or M.press or M.release or M.down or keyboard
+    local redraw=wheel.delta~=0 or signature~=paintKey or M.press or M.release or M.down or keyboard
         or M.x~=lastMouseX or M.y~=lastMouseY or (shown>0 and shown<1) or now-lastPaint>=.25
     if not redraw then return end
     lastPaint,paintKey,lastMouseX,lastMouseY=now,signature,M.x,M.y
@@ -8838,17 +9182,45 @@ local function frame()
         Fade = 1
     end
     endFrame()
+    wheel.delta = 0 -- an event outside a list must not scroll a later page
     -- Keep clicks and typing on the window from reaching the game.
 
 end
 
 local alive = true
 local function stop(reason)
+    if not alive then return end
     print("[Rivals GUI] Stopped: " .. tostring(reason or "replaced or manually stopped"))
     alive = false
+    if wheel.conn then pcall(function() wheel.conn:Disconnect() end) end
+    wheel.delta = 0
     if _G.__RivalsGuiSession == guiToken then _G.__RivalsGuiSession = nil end
     pcall(wipe)
     if type(setrobloxinput) == "function" then pcall(setrobloxinput, true) end
+end
+reloadScript = function()
+    if shared.busy or upstreamBusy() then return end
+    job("Downloading latest script...", function()
+        saveConfig()
+        saveSettings()
+        local source
+        for attempt = 1, 3 do
+            local url = "https://raw.githubusercontent.com/WilliamO2025/RivalsSkinChanger/main/skin-gui.lua?refresh="
+                .. tostring(math.floor(tick()*1000)) .. "-reload-" .. attempt
+            local ok, body = pcall(function() return game:HttpGet(url) end)
+            if ok and type(body) == "string" and body:match("^%-%- Rivals Skin Changer [%d%.]+;") then
+                source = body
+                break
+            end
+            if attempt < 3 then task.wait(attempt) end
+        end
+        assert(source, "Reload download failed; your current GUI is still running.")
+        local fn, err = loadstring(source)
+        assert(type(fn) == "function", err or "Reload could not compile the downloaded script.")
+        -- Do not tear down from inside drawWindow: finish its current frame first.
+        state.reloadReady = fn
+        state.status = "Restarting script..."
+    end)
 end
 -- What is on screen right now, as text: for checking the layout from a script.
 local function dump()
@@ -8934,10 +9306,24 @@ task.spawn(function()
             lastError = tostring(err)
             print("[Rivals GUI] " .. lastError)
         end
+        if state.reloadReady then stopReason="Reload script";break end
         if state.unload then stopReason="Unload button";break end
         task.wait(.016)
     end
     stop(stopReason or "GUI session replaced")
+    if state.reloadReady then
+        local fn = state.reloadReady
+        state.reloadReady = nil
+        shared.busy = false
+        local ok, err = pcall(fn)
+        local replacement = _G.__RivalsDrawnGui
+        if not ok or not replacement or replacement.state == state or not _G.__RivalsGuiSession then
+            print("[Rivals GUI] Reload failed: " .. tostring(err or "new GUI did not start") .. ". Run the loadstring again.")
+            if type(notify) == "function" then pcall(notify, "Reload failed; run the loadstring again.", "Rivals Skin Changer", 8) end
+        else
+            replacement.state.open = true
+        end
+    end
 end)
 autoApplyOnJoin()
 if startedHidden and type(notify) == "function" then

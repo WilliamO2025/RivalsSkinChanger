@@ -1,4 +1,4 @@
-# Rivals Skin Changer 3.8
+# Rivals Skin Changer 3.9
 
 Hybrid of Martini's FULLMATCHA GUI/engine and our loader improvements. Open with:
 
@@ -87,3 +87,13 @@ Save & Apply now immediately hides drawings and releases game input before compi
 Wheel input is still not supported by this Matcha Drawing menu. Drag the list or scrollbar, or point at it and use arrows/Page Up/Page Down. Upstream documents the same limitation. The menu is not guaranteed to stay responsive during synchronous host calls, and loading is not instant.
 
 All six Misc pages, Apply hiding/no-op/retry behavior, asset counting, name reference-count handling, saved-layout retry, existing GUI performance/lifecycle, offset/layout tests and autoexec tests pass in isolated mocks. Live Roblox behavior and timing remain unverified. Rejoin to fetch 3.8 with the existing autoexec launcher; no Matcha files were changed.
+
+## October 21 — change-only Apply and Reload script (3.9)
+
+After the initial apply in a fresh server, Apply compares the requested settings with the last successful configuration. It restores/replaces only changed weapon groups, wraps, finishers and charms, reuses the initialized engine and dictionary lookup, and runs only affected effect handlers. Default restores the original model and animation/icon pointers. Swaps sharing a model, dictionary slot or borrowed script are updated together; failed work remains pending for retry. New servers still need the initial full apply. Upgrade from 3.8 requires one rejoin because that version did not preserve original animation pointers.
+
+Settings > Reload script sits directly under Unload. It saves selections, fetches the newest main-branch bundle with a fresh URL, compiles it before stopping the old GUI, then cleans up drawings/input and opens one replacement. It refuses to overlap Apply. Download failures leave the current window running. Already applied skins and the current incremental engine stay active during a same-version GUI reload. An engine-version upgrade may require a rejoin. Reload does not restart Roblox or Matcha.
+
+Wheel support is conditional: the menu now subscribes to UserInputService.InputChanged when the host exposes it, consumes wheel input only over the hovered list, and disconnects on unload/reload. Matcha's published docs still list only InputBegan/InputEnded, so wheel events are not guaranteed on this build. Settings reports unavailable / waiting for host events / input received. Dragging and keyboard scrolling remain available.
+
+Validation: isolated tests execute the actual model-swap and dictionary-sync helpers for single-weapon edits, shared script families, Default, dependent spare scripts, cosmetics, auxiliary wrap changes/removal, failed-write retry and stale-session rejection. GUI tests cover resident-engine dispatch, wheel-capable and wheel-unavailable hosts, reload placement, offline retry, selection preservation and one-window replacement. Existing launcher, layout and offset tests pass. Live Matcha/Roblox behavior is not verified.

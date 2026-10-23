@@ -1,4 +1,4 @@
-# Rivals Skin Changer 4.0
+# Rivals Skin Changer 4.0.1
 
 Hybrid of Martini's FULLMATCHA GUI/engine and our loader improvements. Open with:
 
@@ -13,7 +13,7 @@ Right Shift opens/hides the GUI. Pick a weapon or cosmetic, then **Save & Apply*
 - Weapon categories, searchable skin artwork, Default, Switch and owned-skin Swap.
 - Wraps, finishers, charms/ranks, skyboxes and lighting.
 - Hit/headshot/kill sounds, tracer colour/speed, and upstream local spoof controls.
-- 420px skin sources where available, falling back to the site's artwork.
+- Settings > Extras > Artwork quality: Low (150px) or HD (420px) where available, falling back to the site's artwork. Saved preference, immediate change, no skin reapply.
 - Bundled engine, previous-GUI cleanup, guarded memory access and config backups.
 - Favorites, recent selections, sorting/rarity/owned filters and new items read from the game.
 - Config history/restore, share codes/import, inventory export and a support log.

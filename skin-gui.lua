@@ -1,4 +1,4 @@
--- Rivals Skin Changer 4.0; upstream Martini; see UPSTREAM.md for credits.
+-- Rivals Skin Changer 4.0.1; upstream Martini; see UPSTREAM.md for credits.
 
 -- Upgrade from our 2.x GUI. Only our own state and preferences are consulted.
 local old = _G.__RIVALS_SKIN_GUI
@@ -6933,7 +6933,7 @@ local state = {
     ownedOnly = true, showOnAutoexec = false,
     -- Extras: safe mode applies skins only; FPS mode slows the changer's
     -- loops down; the panic key puts the game's own look back.
-    safeMode = false, fpsMode = false, panicKey = nil, settingsPage = 1,
+    lowArtwork = false, safeMode = false, fpsMode = false, panicKey = nil, settingsPage = 1,
     notify = 1, notifyStyle = 1, lastRbx = nil,
 }
 local catalog = {weapons = {}, wraps = {}, finishers = {}, charms = {}, skyFaces = {}, loaded = false}
@@ -7290,6 +7290,7 @@ local function loadSettings()
         state.noticeSeen = body:match("noticeseen%s*=%s*(%d)") == "1"
         state.safeMode = body:match("safemode%s*=%s*(%d)") == "1"
         state.fpsMode = body:match("fpsmode%s*=%s*(%d)") == "1"
+        state.lowArtwork = body:match("lowartwork%s*=%s*(%d)") == "1"
         local panic = tonumber(body:match("panickey%s*=%s*(%d+)"))
         state.panicKey = panic and KEY_NAMES[panic] and panic or nil
         state.notify = tonumber(body:match("notify%s*=%s*(%d)")) or 1
@@ -7311,6 +7312,7 @@ local function saveSettings()
         .. "noticeseen=" .. (state.noticeSeen and "1" or "0") .. "\n"
         .. "safemode=" .. (state.safeMode and "1" or "0") .. "\n"
         .. "fpsmode=" .. (state.fpsMode and "1" or "0") .. "\n"
+        .. "lowartwork=" .. (state.lowArtwork and "1" or "0") .. "\n"
         .. "panickey=" .. tostring(state.panicKey or 0) .. "\n"
         .. "notify=" .. tostring(state.notify) .. "\n"
         .. "notifystyle=" .. tostring(state.notifyStyle) .. "\n"
@@ -7898,13 +7900,18 @@ local imageObjects = {}
 local function cachePath(path) return CACHE .. "/" .. path:gsub("[^%w%-_%.]", "_") .. ".dat" end
 local function loadImage(path)
     local file = cachePath(path)
+    local low = path:sub(1, 4) == "low|"
+    if low then path = path:sub(5) end
     local okHas, has = pcall(isfile, file)
     if okHas and has then
         local okRead, body = pcall(readfile, file)
         if okRead and type(body) == "string" and #body > 8 then return body end
     end
     local ok, body = false, nil
-    if IMAGE_URLS[path] then ok, body = pcall(fetch, IMAGE_URLS[path]) end
+    if IMAGE_URLS[path] then
+        local url = low and IMAGE_URLS[path]:gsub("/420/420/", "/150/150/") or IMAGE_URLS[path]
+        ok, body = pcall(fetch, url)
+    end
     if not ok or type(body) ~= "string" or body:sub(2,4) ~= "PNG" then ok, body = pcall(fetch, path:find("^https?://") and path or (SITE .. path)) end
     if not ok or type(body) ~= "string" or body:sub(2, 4) ~= "PNG" then return nil end
     pcall(writefile, file, body)
@@ -7928,12 +7935,15 @@ local function requestImage(path)
                 else
                 if _G.__RivalsGuiSession ~= guiToken then break end
                 local p = table.remove(imageQueue,1)
-                if state.open and tick()-(images[p].lastWanted or 0) < .75 then
+                local entry = p and images[p]
+                if entry and state.open and tick()-(entry.lastWanted or 0) < .75 then
                     local ok, data = timedCall("Artwork fetch/cache", loadImage, p)
                     if _G.__RivalsGuiSession ~= guiToken then break end
-                    images[p].data = ok and data or nil
-                    images[p].state = images[p].data and "ok" or "failed"
-                else
+                    if images[p] == entry then
+                        entry.data = ok and data or nil
+                        entry.state = entry.data and "ok" or "failed"
+                    end
+                elseif p then
                     images[p] = nil
                 end
                 artworkRevision=artworkRevision+1
@@ -8070,6 +8080,7 @@ end
 local decodedThisFrame, nextDecodeAt = false, 0
 local function picture(path, x, y, w, h, z, key, alpha)
     if not path then return false end
+    if state.lowArtwork then path = "low|" .. path end
     local e = requestImage(path)
     if e.state ~= "ok" then return false end
     key = key or path
@@ -8099,6 +8110,13 @@ local function picture(path, x, y, w, h, z, key, alpha)
     return true
 end
 local function beginFrame()
+    if state.drawnLowArtwork ~= nil and state.drawnLowArtwork ~= state.lowArtwork then
+        for _, slot in pairs(imageObjects) do pcall(function() slot.obj:Remove() end) end
+        imageObjects, images, imageQueue = {}, {}, {}
+        shownImages, drawnImages = {}, {}
+        artworkRevision = artworkRevision + 1
+    end
+    state.drawnLowArtwork = state.lowArtwork
     decodedThisFrame=false
     for k in pairs(Used) do Used[k] = 0 end
     drawnImages = {}
@@ -9798,6 +9816,15 @@ SETTINGS_PAGES[2] = function(x, y, w, cx, cy)
     cy = cy + 50
     text("These take effect the next time you Save & Apply.", cx, cy + 6, C.faint, 12, 5)
     if state.panicKey and button(x + w - 200, cy, 180, 30, "Clear panic key") then state.panicKey = nil; saveSettings() end
+    cy = cy + 44
+    text("Artwork quality", cx, cy + 6, C.text, 14, 5, true)
+    text("Low uses 150px thumbnails where available. Changes immediately.", cx, cy + 26, C.faint, 11, 5)
+    local quality = segmented(x + w - 260, cy, 240, 30, {"Low (150px)", "HD (420px)"}, state.lowArtwork and 1 or 2)
+    if quality then
+        state.lowArtwork = quality == 1
+        saveSettings()
+        state.status = state.lowArtwork and "Low artwork enabled; skins are unchanged." or "HD artwork enabled."
+    end
 end
 
 -- Config: what changed since the last save, copy / share / import, your
@@ -9939,14 +9966,14 @@ local DRAW = {Skins = drawSkins, Cosmetics = drawCosmetics, Visuals = drawVisual
     Settings = drawSettings}
 DRAW.Updates = function(x,y,w,h)
     rect(x,y,w,h,C.panel,2,8)
-    text("Update log / 4.0 / October 22, 2026",x+20,y+20,C.text,18,5,true)
+    text("Update log / 4.0.1 / October 22, 2026",x+20,y+20,C.text,18,5,true)
     local entries={"Roblox layout, gradient and tracer compatibility fixes.",
         "Apply updates changed weapons/settings; Default restores their originals.",
         "Favorites, recent picks, filters and live-game catalog additions.",
         "Config history, sharing, import, inventory export and logs.",
         "Themes, lighting tuning and health bar shine/pulse/backing.",
         "Panic key, skins-only mode and FPS-friendly effects.",
-        "Reload stays clickable during Apply and waits before restarting."}
+        "Artwork quality: Low (150px) or HD (420px) in Settings > Extras."}
     for i,lineText in ipairs(entries) do text(lineText,x+20,y+62+i*29,C.dim,13,5) end
 end
 local function viewport()

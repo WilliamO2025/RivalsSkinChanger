@@ -1,10 +1,32 @@
 -- Rivals skin changer (Matcha)
 local t_start = tick()
+-- The panic key runs the changer on an empty config (see the config read).
+local PANIC_RUN = type(_G.__RSC_CONFIG_OVERRIDE) == "string" and _G.__RSC_CONFIG_OVERRIDE:sub(1, 8) == "-- panic"
+-- Quick apply (the GUIs set _G.__RSC_QUICK when only the sky, lighting,
+-- sounds, tracers, hands, spoof, health bar, buttons or theme changed): the
+-- skins, wraps, finishers, charms and scopes of the last run in this server
+-- stay as they are, so only the rest runs again.
+local QUICK = nil -- resident incremental apply handles all sections
+_G.__RSC_QUICK = nil
 
 -- Health: every warning the run prints is also noted, and the run ends with
 -- one line saying whether everything applied, for players to paste back.
 _G.__RSC_PROBLEMS = {}
+-- The GUIs' log viewer reads _G.__RSC_LOG (the last 300 lines of every run)
+-- and their progress bar _G.__RSC_PROGRESS ({percent, step}), worked out
+-- from the step each line reports.
+_G.__RSC_LOG = type(_G.__RSC_LOG) == "table" and _G.__RSC_LOG or {}
+do
+    local okT, stamp = pcall(os.date, "%H:%M:%S")
+    table.insert(_G.__RSC_LOG, "---- run at " .. (okT and stamp or "?") .. (PANIC_RUN and " (panic key)" or ""))
+end
+_G.__RSC_PROGRESS = {0, "Starting"}
 local print = (function(realPrint)
+    local STEPS = {{"Offsets:", 5, "Reading offsets"}, {"Config:", 10, "Reading your config"},
+        {"Swapped", 45, "Skins swapped"}, {"Animations", 60, "Animations and wraps"}, {"Skybox", 70, "Sky"},
+        {"Lighting", 75, "Lighting"}, {"Tracers", 80, "Tracers"}, {"No hands", 84, "Hands"},
+        {"Finishers", 88, "Finishers and charms"}, {"Health bar", 92, "Health bar"}, {"Scopes", 94, "Scopes"},
+        {"Buttons", 97, "Buttons"}, {"Health:", 100, "Done"}}
     local PROBLEM = {"error", "Error", "Couldn't", "couldn't", "can't", "not applied", "Not swapped",
         "Not in the game's", "Skipped", "Left default", "not loaded yet", "still isn't reporting",
         "slow memory scan", "no longer fits", "isn't a"}
@@ -13,8 +35,22 @@ local print = (function(realPrint)
         local parts = {}
         for i = 1, select("#", ...) do parts[#parts + 1] = tostring((select(i, ...))) end
         local msg = table.concat(parts, " ")
-        if not msg:find("^%[RivalsSkinChanger%]") or msg:find("^%[RivalsSkinChanger%] Health:") then return end
-        msg = msg:gsub("^%[RivalsSkinChanger%]%s*", "")
+        if not msg:find("^%[RivalsSkinChanger%]") then return end
+        local log = _G.__RSC_LOG
+        if type(log) == "table" then
+            log[#log + 1] = msg:gsub("^%[RivalsSkinChanger%]%s*", "")
+            while #log > 300 do table.remove(log, 1) end
+        end
+        local short = msg:gsub("^%[RivalsSkinChanger%]%s*", "")
+        for _, st in ipairs(STEPS) do
+            if short:sub(1, #st[1]) == st[1] then
+                local now = _G.__RSC_PROGRESS
+                if type(now) ~= "table" or (now[1] or 0) < st[2] then _G.__RSC_PROGRESS = {st[2], st[3]} end
+                break
+            end
+        end
+        if msg:find("^%[RivalsSkinChanger%] Health:") then return end
+        msg = short
         local bad = false
         for _, k in ipairs(PROBLEM) do if msg:find(k, 1, true) then bad = true break end end
         for got, total in msg:gmatch("applied: (%d+)/(%d+)") do
@@ -409,9 +445,18 @@ end
 -- Undo the previous run
 local dictCache = {}
 do
+    if QUICK then
+        local last = _G.__RIVALS_SKIN_CHANGER_STATE
+        if type(last) == "table" and type(last.restores) == "table" and last.wfAddr == wf.Address then
+            QUICK.prev = last
+            if type(last.dicts) == "table" then dictCache = last.dicts end
+        else
+            QUICK = nil
+        end
+    end
 
-    local old = _G.__RIVALS_COSMETICS_STATE
-    _G.__RIVALS_COSMETICS_STATE = nil
+    local old = not QUICK and _G.__RIVALS_COSMETICS_STATE or nil
+    if not QUICK then _G.__RIVALS_COSMETICS_STATE = nil end
     if type(old) == "table" and type(old.restores) == "table" then
         local fin = game:GetService("ReplicatedStorage"):FindFirstChild("Modules")
         fin = fin and fin:FindFirstChild("Finishers")
@@ -433,9 +478,9 @@ do
         end
     end
 
-    local prev = _G.__RIVALS_SKIN_CHANGER_STATE
-    _G.__RIVALS_SKIN_CHANGER_STATE = nil
-    if type(prev) ~= "table" then
+    local prev = not QUICK and _G.__RIVALS_SKIN_CHANGER_STATE or nil
+    if not QUICK then _G.__RIVALS_SKIN_CHANGER_STATE = nil end
+    if type(prev) ~= "table" and not QUICK then
         local saved = loadUndo()
         if saved == false then
             print("[RivalsSkinChanger] Skins were applied in this server before Matcha restarted, and the saved undo data can't be read, so applying again would mix the models up. Rejoin, then run it once.")
@@ -1416,6 +1461,10 @@ local ENABLE_SOUND_REPLACEMENT = false
 -- Name copies
 local ENABLE_NAME_COPIES = true
 local nameCopies = {}
+if QUICK then
+    memoryRestores, nameCopies = QUICK.prev.restores or {}, QUICK.prev.nameCopies or {}
+    floatRestores = QUICK.prev.floats or {}
+end
 -- Writes everything the swaps overwrote to the undo file (see loadUndo).
 local function saveUndo()
     local function n(v) return v and string.format("%.0f", v) or "-" end
@@ -1472,6 +1521,48 @@ local configLighting = {}
 local configTracers = {}
 _G.__RSC_HPBAR_CFG = {} -- [Health Bar]; a global, the main chunk is at its local limit
 _G.__RSC_BTN_CFG = {} -- [Buttons]
+-- Where a UIGradient keeps its colour stops (list pointer, then the count 8
+-- bytes on; 20-byte stops: time, r, g, b, envelope) and its transparency
+-- stops (12 bytes: time, value, envelope). They moved between builds (+0xf8 /
+-- +0xb8, then +0xf0 / +0xb0 on 9ac8595), so they're read off a real gradient:
+-- the list whose first stop is at time 0 and last at time 1. Nil when no
+-- gradient shows them - then nothing is written.
+_G.__RSC_GRADOFF = function()
+    if _G.__RSC_GRAD_C then return _G.__RSC_GRAD_C, _G.__RSC_GRAD_T end
+    local function rdp(a) local ok, v = pcall(mrd, "uintptr_t", a) return ok and v or nil end
+    local function stopsAt(a, off, stride)
+        local p, okN, n = rdp(a + off), pcall(mrd, "int", a + off + 8)
+        if not p or p < 0x10000 or not okN or not n or n < 2 or n > 64 then return false end
+        local ok0, t0 = pcall(mrd, "float", p)
+        local ok1, t1 = pcall(mrd, "float", p + (n - 1) * stride)
+        return ok0 and ok1 and t0 == 0 and t1 == 1
+    end
+    local lp = game:GetService("Players").LocalPlayer
+    local ps = lp and lp:FindFirstChild("PlayerScripts")
+    local ui = ps and ps:FindFirstChild("UserInterface")
+    local votes, seen = {}, 0
+    for _, d in ipairs(ui and ui:GetDescendants() or {}) do
+        if d.ClassName == "UIGradient" then
+            seen = seen + 1
+            for c = 0x80, 0x180, 8 do
+                if stopsAt(d.Address, c, 20) then
+                    for t = c - 0x60, c - 8, 8 do
+                        if stopsAt(d.Address, t, 12) then
+                            local k = c .. ":" .. t
+                            votes[k] = (votes[k] or 0) + 1
+                            if votes[k] >= 3 then
+                                _G.__RSC_GRAD_C, _G.__RSC_GRAD_T = c, t
+                                return c, t
+                            end
+                        end
+                    end
+                end
+            end
+            if seen > 40 then break end
+        end
+    end
+    return nil
+end
 -- Keeps an instance alive while the changer writes to it every frame: the
 -- game frees UI it rebuilds, and writing into freed memory crashes Roblox.
 -- An Instance points to itself at +8 and to its shared_ptr control block at
@@ -2133,11 +2224,16 @@ pcall(function()
 end)
 
 -- Notifications
+-- The GUIs set _G.__RSC_NOTIFY ("all", "errors" or "off") and
+-- _G.__RSC_NOTIFY_STYLE ("matcha", "roblox" or "both").
 local function notifyUser(title, text, duration)
     duration = duration or 8
-    if typeof(notify) == "function" then
+    local level, style = _G.__RSC_NOTIFY or "all", _G.__RSC_NOTIFY_STYLE or "both"
+    if level == "off" or (level == "errors" and not tostring(title):find("Error")) then return end
+    if typeof(notify) == "function" and style ~= "roblox" then
         pcall(notify, text, title, duration)
     end
+    if style == "matcha" then return end
     pcall(function()
         game:GetService("StarterGui"):SetCore("SendNotification", {
             Title = title,
@@ -2266,8 +2362,10 @@ end
 -- thread keeps its global state. Build 02c37bc (Sep 30 2026) had tt +1,
 -- lsizenode +4, global state +0x68; cec3ad5 (Oct 2026) moved tt back to +0.
 -- So they are found at runtime (ROUTE.detect) instead of being hard-coded.
-local ROUTE = {thread = 0x170, slot = 0x178, globalState = 0x68, registry = 0x620, node = 0x18, array = 0x20,
-    sizearray = 8, tt = 1, lsize = 4}
+-- Defaults: Roblox build 9ac8595 (ModuleScript thread +0x150, registry slot
+-- +0x170, thread tag at byte +2); ROUTE.detect looks again when they don't fit.
+local ROUTE = {thread = 0x150, slot = 0x170, globalState = 0x78, registry = 0x618, node = 0x18, array = 0x20,
+    sizearray = 8, tt = 2, lsize = 4}
 local TAG_TABLE, TAG_THREAD = 7, 10
 
 local function rbyte(a) local ok, v = pcall(mrd, "byte", a) return ok and v or nil end
@@ -2276,7 +2374,7 @@ local function rint(a) local ok, v = pcall(mrd, "int", a) return ok and v or nil
 -- Finds tt, the global-state offset, the registry offset and lsizenode from
 -- one module: its thread's header says where tt is; the right global state
 -- leads to a registry whose slot for this module holds a table.
-ROUTE.detect = function(ms)
+ROUTE.detectAt = function(ms)
     -- What was seen, for the debug copy ("why did detection fail").
     local trace = {}
     _G.__RSC_ROUTE_TRACE = trace
@@ -2350,7 +2448,8 @@ ROUTE.detect = function(ms)
         if not no then trace.stop = "module table found but its nodes weren't" return false end
         ROUTE.tt, ROUTE.globalState, ROUTE.registry, ROUTE.lsize = tt, x, y, lsize
         ROUTE.sizearray, ROUTE.array, ROUTE.node, ROUTE.ok = so, ao, no, true
-        _G.__RSC_LAYOUT = {tt = tt, globalState = x, registry = y, lsize = lsize, sizearray = so, array = ao, node = no}
+        _G.__RSC_LAYOUT = {tt = tt, globalState = x, registry = y, lsize = lsize, sizearray = so, array = ao, node = no,
+            thread = ROUTE.thread, slot = ROUTE.slot}
         print(string.format("[RivalsSkinChanger] Memory layout: type byte +%d, global state +0x%x, registry +0x%x, size byte +%d, array +0x%x/+%d, nodes +0x%x",
             tt, x, y, lsize, ao, so, no))
         return true
@@ -2386,6 +2485,43 @@ ROUTE.detect = function(ms)
         or (trace.tagged > 0 and "registry-like tables found, but none held this module" or "no registry found"))
     return false
 end
+-- Where a ModuleScript keeps its thread and registry slot moves between
+-- builds too (+0x170/+0x178, then +0x150/+0x170 on 9ac8595). When the
+-- current pair doesn't lead anywhere, every pointer to a thread in the
+-- ModuleScript is tried with the slot a few bytes after it; no thread at all
+-- means the game hasn't loaded the module yet.
+ROUTE.detect = function(ms)
+    if ROUTE.detectAt(ms) then return true end
+    local a = ms and ms.Address
+    if not a then return false end
+    local th0, sl0 = ROUTE.thread, ROUTE.slot
+    local tried, anyThread = {[th0 .. ":" .. sl0] = true}, false
+    for th = 0x100, 0x200, 8 do
+        local p = rd(a + th)
+        local isThread = false
+        if p and p > 0x10000 and p < 0x7fffffffffff then
+            for b = 0, 3 do if rbyte(p + b) == TAG_THREAD then isThread = true end end
+        end
+        if isThread then
+            anyThread = true
+            for _, d in ipairs({8, 0x20, 0x10, 0x18, 0x28}) do
+                local sl = th + d
+                local v = rint(a + sl)
+                if not tried[th .. ":" .. sl] and v and v >= 1 and v < 10000000 then
+                    tried[th .. ":" .. sl] = true
+                    ROUTE.thread, ROUTE.slot, ROUTE.nextFull = th, sl, nil
+                    if ROUTE.detectAt(ms) then
+                        print(string.format("[RivalsSkinChanger] Module thread/slot moved: +0x%x/+0x%x", th, sl))
+                        return true
+                    end
+                end
+            end
+        end
+    end
+    ROUTE.thread, ROUTE.slot = th0, sl0
+    if not anyThread then (_G.__RSC_ROUTE_TRACE or {}).stop = "no thread/slot on the module" end
+    return false
+end
 
 -- A layout this PC learned for the running Roblox build, kept in a file.
 -- When ROUTE.detect can't read a new build but the slow scan still finds
@@ -2398,9 +2534,10 @@ ROUTE.savedFile = function()
 end
 ROUTE.apply = function(lay, from)
     for _, k in ipairs(ROUTE.FIELDS) do ROUTE[k] = lay[k] end
+    if type(lay.thread) == "number" and type(lay.slot) == "number" then ROUTE.thread, ROUTE.slot = lay.thread, lay.slot end
     ROUTE.ok = true
     _G.__RSC_LAYOUT = {tt = lay.tt, globalState = lay.globalState, registry = lay.registry, lsize = lay.lsize,
-        sizearray = lay.sizearray, array = lay.array, node = lay.node}
+        sizearray = lay.sizearray, array = lay.array, node = lay.node, thread = ROUTE.thread, slot = ROUTE.slot}
     print(string.format("[RivalsSkinChanger] Memory layout (%s): type byte +%d, global state +0x%x, registry +0x%x, size byte +%d, array +0x%x/+%d, nodes +0x%x",
         from, lay.tt, lay.globalState, lay.registry, lay.lsize, lay.array, lay.sizearray, lay.node))
 end
@@ -2494,7 +2631,8 @@ ROUTE.learn = function(ms, nodes)
                         if rint(g + y + 12) == TAG_TABLE then
                             for _, so in ipairs({8, 12, 4}) do
                                 for _, ao in ipairs({0x20, 0x18, 0x28, 0x10, 0x30}) do
-                                    local lay = {tt = tt, globalState = x, registry = y, sizearray = so, array = ao}
+                                    local lay = {tt = tt, globalState = x, registry = y, sizearray = so, array = ao,
+                                        thread = ROUTE.thread, slot = ROUTE.slot}
                                     if fits(lay) then
                                         ROUTE.apply(lay, "learned from the slow scan")
                                         local okW = pcall(writefile, ROUTE.savedFile(),
@@ -2713,6 +2851,115 @@ local function syncSkinData(pairList, wrapPairs, cache)
 end
 
 -- Skin swaps
+function Delta.prepare(r2)
+    -- [Theme]: one look for the menu buttons, the health bar and the tracers.
+    -- Preset = neon, pastel, mono, sunset, ocean, halloween or christmas;
+    -- Follow = time (colours from your clock when it applies), rarity (each
+    -- gun's tracers in its skin's rarity colour) or wrap (tracers match the
+    -- weapon in your hands). A [Buttons], [HealthBar] or [Tracers] section
+    -- of your own always wins over the theme.
+    do
+        local NL = string.char(10)
+        local theme, sections, skinsOf, section = {}, {}, {}, "skins"
+        for line in (r2 .. NL):gmatch("(.-)" .. NL) do
+            line = line:gsub(string.char(13), "")
+            local h = line:match("^%s*%[%s*(.-)%s*%]%s*$")
+            if h then
+                section = h:lower()
+                sections[section] = true
+            elseif not line:match("^%s*%-%-") then
+                local k, v = line:match("^%s*([^=|]-)%s*=%s*(.-)%s*$")
+                if k and k ~= "" and v ~= "" then
+                    if section == "theme" then theme[k:lower()] = v:lower()
+                    elseif section == "skins" then skinsOf[k] = v end
+                end
+            end
+        end
+        local THEMES = {
+            neon = {"ff00e6", "00f0ff"}, pastel = {"ffb3d9", "b3e5ff"}, mono = {"ffffff", "7a7a7a"},
+            sunset = {"ff5e3a", "ffcc33"}, ocean = {"0077ff", "00e5c7"}, halloween = {"ff7a00", "8a2dff"},
+            christmas = {"e01b24", "1fae4b"},
+        }
+        local pal = THEMES[theme.preset or ""]
+        if theme.follow == "time" then
+            local okH, hour = pcall(function() return tonumber(os.date("%H")) end)
+            hour = okH and hour or 12
+            pal = (hour >= 5 and hour < 8) and {"ff9a5a", "ffd36b"} or (hour >= 8 and hour < 17) and {"4fb3ff", "a6e3ff"}
+                or (hour >= 17 and hour < 20) and {"ff5e8a", "8a5cff"} or {"2d3cff", "8a2dff"}
+        end
+        local rarityGuns = 0
+        if pal or theme.follow then
+            local add = {}
+            if pal and not sections.buttons then
+                add[#add + 1] = "[Buttons]"
+                for _, b in ipairs({"Green", "Blue", "Yellow", "Gold"}) do add[#add + 1] = b .. "=" .. pal[1] .. ">" .. pal[2] end
+            end
+            if pal and not sections.healthbar then
+                add[#add + 1] = "[HealthBar]"
+                add[#add + 1] = "Style=Gradient"
+                add[#add + 1] = "Color1=" .. pal[1]
+                add[#add + 1] = "Color2=" .. pal[2]
+            end
+            if not sections.tracers then
+                local tr = {}
+                if theme.follow == "wrap" then
+                    tr[1] = "Color=wrap"
+                elseif theme.follow == "rarity" then
+                    -- Each gun's skin -> its rarity in the game's item list.
+                    local RARITY = {Common = "7bff00", Rare = "00ddff", Legendary = "ff3c3c", Mythical = "8185f2",
+                        Unique = "ff8c00", Genuine = "7fa35a"}
+                    pcall(function()
+                        local mods = game:GetService("ReplicatedStorage"):FindFirstChild("Modules")
+                        local f = nodesOf(moduleTable(mods and mods:FindFirstChild("CosmeticLibrary")), 256, {Cosmetics = true})
+                        local want = {}
+                        for _, skin in pairs(skinsOf) do want[skin] = true end
+                        local d = f and f.Cosmetics and nodesOf(rd(f.Cosmetics), 16384, want)
+                        for weapon, skin in pairs(skinsOf) do
+                            local item = d and d[skin] and rd(d[skin])
+                            local rf = item and nodesOf(item, 32, {Rarity = true})
+                            local sp = rf and rf.Rarity and rd(rf.Rarity)
+                            local okS, rar = pcall(mrd, "string", (sp or 0) + STRING_DATA)
+                            local hex = okS and RARITY[rar]
+                            if hex then tr[#tr + 1], rarityGuns = weapon .. "=" .. hex, rarityGuns + 1 end
+                        end
+                    end)
+                    if pal then table.insert(tr, 1, "Color=" .. pal[1]) end
+                elseif pal then
+                    tr[1] = "Color=" .. pal[1]
+                end
+                if #tr > 0 then
+                    add[#add + 1] = "[Tracers]"
+                    for _, l in ipairs(tr) do add[#add + 1] = l end
+                end
+            end
+            if #add > 0 then
+                r2 = r2 .. NL .. table.concat(add, NL) .. NL
+                print("[RivalsSkinChanger] Theme: " .. (theme.preset or "none") .. (theme.follow and (", follows " .. theme.follow) or "")
+                    .. (theme.follow == "rarity" and (" (" .. rarityGuns .. " guns by rarity)") or "")
+                    .. " - sets what you haven't set yourself")
+            end
+        end
+    end
+    -- Safe mode (GUI setting): skins, wraps, finishers and charms only.
+    if _G.__RSC_SAFE then
+        local keep, out, section = {skins = true, wraps = true, finishers = true, charms = true}, {}, "skins"
+        local NL = string.char(10)
+        for line in (r2 .. NL):gmatch("(.-)" .. NL) do
+            local h = line:gsub(string.char(13), ""):match("^%s*%[%s*(.-)%s*%]%s*$")
+            if h then
+                local low = h:lower()
+                section = low:find("wrap") and "wraps" or low:find("finisher") and "finishers"
+                    or low:find("charm") and "charms" or low:find("skin") and "skins" or "other"
+            end
+            if keep[section] then out[#out + 1] = line end
+        end
+        r2 = table.concat(out, NL)
+        print("[RivalsSkinChanger] Safe mode: skins, wraps, finishers and charms only")
+    end
+
+    return r2
+end
+
 local function applySkinSwapper()
     skinDataPairs, renamedScripts = {}, {}
     configWrapPairs, configFinishers, configCharms = {}, {}, {}
@@ -2762,10 +3009,15 @@ local function applySkinSwapper()
         return 0, "rivals_config.lua was not found in your executor's workspace folder! Make sure rivals_config.lua is placed in your workspace directory."
     end
 
-    print("[RivalsSkinChanger] Config: " .. tostring(targetFile)
+    -- The GUI's panic key hands over an empty config for one run (everything
+    -- back to the game's look), without touching the file.
+    local override = _G.__RSC_CONFIG_OVERRIDE
+    _G.__RSC_CONFIG_OVERRIDE = nil
+    print("[RivalsSkinChanger] Config: " .. (PANIC_RUN and "the game's own look (panic key)" or (type(override) == "string" and "from the GUI" or tostring(targetFile)))
         .. (_G.__RIVALS_SUPPORT_ID and ("  (ref " .. _G.__RIVALS_SUPPORT_ID .. ")") or ""))
-    local okRead, r2 = true, Delta.text
+    local okRead, r2 = true, Delta.text or override
     if not r2 then okRead, r2 = pcall(readfile, targetFile) end
+    if type(r2) ~= "string" then okRead, r2 = pcall(readfile, targetFile) end
     if not okRead or not r2 then
         return 0, "Failed to read file '" .. tostring(targetFile) .. "'. File may be locked by another application."
     end
@@ -2773,8 +3025,8 @@ local function applySkinSwapper()
     if r2:sub(1, 3) == string.char(239, 187, 191) then
         r2 = r2:sub(4)
     end
-
-    if #r2:gsub("%s+", "") == 0 then
+    r2 = Delta.prepare(r2)
+    if #r2:gsub("%s+", "") == 0 and type(override) ~= "string" then
         return 0, "Config file '" .. tostring(targetFile) .. "' is completely empty (0 bytes). Please generate your config on the website."
     end
 
@@ -2906,6 +3158,17 @@ local function applySkinSwapper()
         end
     end
     for _, j in ipairs(swapJobs) do jobs[#jobs + 1] = j end
+    if QUICK then
+        local n = 0
+        for _, j in ipairs(jobs) do
+            local t = j[2]:lower()
+            if t ~= "default" and t ~= "standard" then
+                n = n + 1
+                if j[3] == j[1] then ACTIVE_CONFIG_SKINS[j[1]] = j[2] end
+            end
+        end
+        return math.max(1, n)
+    end
     local inConfig = {}
     for _, j in ipairs(jobs) do inConfig[j[1]], inConfig[j[2]], inConfig[j[3]] = true, true, true end
 
@@ -3203,7 +3466,12 @@ local count, errorReason = applySkinSwapper()
 saveUndo() -- saved now, in case a later step fails before the final save
 local elapsed = math.floor((tick() - t_start) * 1000)
 
-if count == 0 then
+if QUICK then
+    print("[RivalsSkinChanger] Quick apply: skins, wraps, finishers, charms and scopes kept from the last run")
+elseif count == 0 and PANIC_RUN then
+    print("[RivalsSkinChanger] Panic key: skins and changes are back to the game's own look")
+    notifyUser("Rivals Skin Changer", "Game look restored - Save & Apply brings your changes back.", 6)
+elseif count == 0 then
     if not (errorReason or ""):find("set to Default", 1, true) then
         table.insert(_G.__RSC_PROBLEMS, errorReason or "No skins loaded")
     end
@@ -3369,7 +3637,16 @@ end
 
 pcall(function()
     if not ENABLE_PERSISTENT_FEATURES then return end
-    renderSteppedConn = runService.RenderStepped:Connect(fastSyncGui)
+    -- FPS-friendly mode (GUI setting): 4 times a second instead of every frame.
+    local fsAcc = 0
+    renderSteppedConn = runService.RenderStepped:Connect(function(dt)
+        if _G.__RSC_FPS then
+            fsAcc = fsAcc + (dt or 1 / 60)
+            if fsAcc < 0.25 then return end
+            fsAcc = 0
+        end
+        fastSyncGui()
+    end)
 end)
 
 pcall(function()
@@ -3396,6 +3673,7 @@ end)
 
 -- Wraps
 local function readWrapPairs()
+    if (Delta.text or ""):sub(1, 8) == "-- panic" then return {} end
     local list, seen = {}, {}
 
     for _, p in ipairs(configWrapPairs) do
@@ -3897,9 +4175,14 @@ local function startVolumeWatcher(conf)
     -- a thread's task.wait once the changer run that spawned it has ended.
     if _G.__RIVALS_SOUND_CONN then pcall(function() _G.__RIVALS_SOUND_CONN:Disconnect() end) end
     local seen = {}
+    local soundLast = 0
     _G.__RIVALS_SOUND_CONN = game:GetService("RunService").Heartbeat:Connect(function()
         if _G.__RIVALS_SOUND_WATCH ~= token then return end
         local now = tick()
+        if _G.__RSC_FPS then
+            if now - soundLast < 0.2 then return end
+            soundLast = now
+        end
         for _, parent in ipairs(parents) do
             if parent then
                 for _, s in ipairs(parent:GetChildren()) do
@@ -4555,12 +4838,16 @@ local function startSpoof(conf)
     local okFirst, firstErr = pcall(pass) -- once now, so clearing it restores straight away
     if not okFirst then print("[RivalsSkinChanger] Spoof: " .. tostring(firstErr)) end
     if any then
-        local lastRun, lastError = tick(), nil
+        local lastRun, lastError, lastCard = tick(), nil, 0
         _G.__RIVALS_SPOOF_CONN = game:GetService("RunService").Heartbeat:Connect(function()
             if _G.__RIVALS_SPOOF ~= token then return end
-            pcall(profilePass)
             local now = tick()
-            if now - lastRun < 0.5 then return end
+            -- FPS-friendly mode: the profile card 4 times a second, values once.
+            if not _G.__RSC_FPS or now - lastCard >= 0.25 then
+                lastCard = now
+                pcall(profilePass)
+            end
+            if now - lastRun < (_G.__RSC_FPS and 1 or 0.5) then return end
             lastRun = now
             -- One bad pass (a page closing mid-read) must not stop the next.
             local ok, err = pcall(pass)
@@ -4725,6 +5012,24 @@ function Delta.lightWrite(kind, address, value)
 end
 local function applyLighting(conf, cache)
     local function mwr(kind, address, value) Delta.lightWrite(kind, address, value) end
+    -- The game's own values, recorded the first time each one is written in
+    -- this server and put back at the start of every run, so an emptied
+    -- [Lighting] (or the panic key) restores them.
+    local rec = _G.__RSC_LIGHT_ORIG
+    if type(rec) ~= "table" or rec.job ~= game.JobId then
+        rec = {job = game.JobId, vals = {}}
+        _G.__RSC_LIGHT_ORIG = rec
+    else
+        for _, v in pairs(rec.vals) do pcall(mwr, v[1], v[2], v[3]) end
+    end
+    local function lw(kind, addr, val)
+        local key = kind .. ":" .. tostring(addr)
+        if not rec.vals[key] then
+            local okO, old = pcall(mrd, kind, addr)
+            if okO and old ~= nil then rec.vals[key] = {kind, addr, old} end
+        end
+        mwr(kind, addr, val)
+    end
     local values = {}
     local name = conf.preset and tostring(conf.preset):lower()
     if name == "match" then
@@ -4776,15 +5081,15 @@ local function applyLighting(conf, cache)
             if field.color then
                 local r, g, b = lightingColor(raw)
                 if r then
-                    mwr("float", L.Address + field.off, r)
-                    mwr("float", L.Address + field.off + 4, g)
-                    mwr("float", L.Address + field.off + 8, b)
+                    lw("float", L.Address + field.off, r)
+                    lw("float", L.Address + field.off + 4, g)
+                    lw("float", L.Address + field.off + 8, b)
                     applied = applied + 1
                 end
             else
                 local n = tonumber(raw)
                 if n then
-                    mwr("float", L.Address + field.off, n)
+                    lw("float", L.Address + field.off, n)
                     applied = applied + 1
                 end
             end
@@ -4844,15 +5149,15 @@ local function applyLighting(conf, cache)
                             local ud = rd(node)
                             local r, g, b = lightingColor(values[name])
                             if ud and ud > 0x10000 and r then
-                                mwr("float", ud + COLOR3_FLOATS, r)
-                                mwr("float", ud + COLOR3_FLOATS + 4, g)
-                                mwr("float", ud + COLOR3_FLOATS + 8, b)
+                                lw("float", ud + COLOR3_FLOATS, r)
+                                lw("float", ud + COLOR3_FLOATS + 4, g)
+                                lw("float", ud + COLOR3_FLOATS + 8, b)
                                 wrote = true
                             end
                         else
                             local n = tonumber(values[name])
                             if n then
-                                mwr("double", node, n)
+                                lw("double", node, n)
                                 wrote = true
                             end
                         end
@@ -4905,7 +5210,7 @@ end
 
 local wrapPairs = readWrapPairs()
 Delta.sync = function(wrapPairs)
-if ENABLE_SKIN_DATA_SYNC and (#skinDataPairs > 0 or #wrapPairs > 0) then
+if ENABLE_SKIN_DATA_SYNC and not QUICK and (#skinDataPairs > 0 or #wrapPairs > 0) then
     print("[RivalsSkinChanger] Applying skin animations, offsets, icons" .. (#wrapPairs > 0 and " + wraps" or "") .. "...")
     local tSync = tick()
     local okS, synced, note, wrapsApplied, wrapsMissed, skinsMissed = pcall(syncSkinData, skinDataPairs, wrapPairs, dictCache)
@@ -5075,10 +5380,10 @@ local function applyTracersEffect()
             end
             return nil
         end
-        -- Proto layouts: build 11f155f3, cec3ad5, 02c37bc, then the older one.
+        -- Proto layouts: build 9ac8595, 11f155f3, cec3ad5, 02c37bc, then the older one.
         -- Every layout is tried for an exact 800 first, so a stray constant on
         -- a wrong layout can't pass for an earlier run's speed.
-        local PATHS = {{0x18, 0x20}, {0x48, 0x20}, {0x28, 0x48}, {0x20, 0x38, 8}}
+        local PATHS = {{0x30, 0x48}, {0x18, 0x20}, {0x48, 0x20}, {0x28, 0x48}, {0x20, 0x38, 8}}
         local k
         for pass = 1, 2 do
             for _, pth in ipairs(PATHS) do
@@ -5151,6 +5456,9 @@ local function applyTracersEffect()
         else
             print("[RivalsSkinChanger] Tracers: couldn't find the tracer speed - left as it is")
         end
+    elseif te and orig.speed then
+        -- No Speed line: the game's own 800 back, if an earlier run changed it.
+        pcall(mwr, "double", orig.speed[1], orig.speed[2])
     end
     conf.speed = nil
 
@@ -5233,7 +5541,7 @@ local function applyTracersEffect()
             if _G.__RIVALS_TRACERS ~= token then pcall(function() conn:Disconnect() end) return end
             dt = dt or 1 / 60
             acc, sinceCheck = acc + dt, sinceCheck + dt
-            if acc < 0.05 then return end
+            if acc < (_G.__RSC_FPS and 0.25 or 0.05) then return end
             acc = 0
             if sinceCheck >= 1 then
                 sinceCheck, lastRgb = 0, nil -- rewrite once a second in case the game reset one
@@ -5275,6 +5583,12 @@ local function applyTracersEffect()
         for _, v in pairs(conf) do if v == "sky" then wantsSky = true end end
         if wantsSky and not skyCols then
             print("[RivalsSkinChanger] Tracers: Color=sky needs a sky preset with matching lighting - those tracers keep the game's colour")
+        end
+    elseif not any and te then
+        -- Nothing set: the game's own colours back on every tracer an earlier
+        -- run recoloured.
+        for seq, c in pairs(orig.seqs) do
+            if type(seq) == "number" and type(c) == "table" then writeSeq(seq, c[1], c[2], c[3]) end
         end
     elseif any then
         -- Right after joining the game hasn't loaded TracerEffect yet: look
@@ -5398,7 +5712,7 @@ local function applyNoHandsEffect()
         conn = game:GetService("RunService").Heartbeat:Connect(function(dt)
             if _G.__RIVALS_NOHANDS ~= token or game.JobId ~= job then pcall(function() conn:Disconnect() end) return end
             acc = acc + (dt or 1 / 60)
-            if acc < 0.15 then return end
+            if acc < (_G.__RSC_FPS and 0.5 or 0.15) then return end
             acc = 0
             pcall(pass)
         end)
@@ -5532,7 +5846,8 @@ local function applyCosmetics()
 end
 
 do
-    local okC, done, missed, dupes = pcall(applyCosmetics)
+    -- A quick apply keeps the last run's finishers and charms.
+    local okC, done, missed, dupes = pcall(QUICK and function() return nil end or applyCosmetics)
     if not okC then
         print("[RivalsSkinChanger] Finishers/charms error: " .. tostring(done))
     elseif done then
@@ -5585,6 +5900,17 @@ Delta.health = function()
     local rainbowGrad = (conf.color1 or ""):lower() == "rainbow"
     local g1, g2 = rgbOf(conf.color1, {1, 43 / 255, 214 / 255}), rgbOf(conf.color2, {59 / 255, 91 / 255, 1})
     local speed = math.max(0, math.min(500, tonumber(conf.speed) or 100)) / 100
+    -- Extras: Background = a hex colour or "dark" for the bar's backing
+    -- (instead of a darker copy of the fill); Shine = on sweeps a highlight
+    -- along the bar (needs the linked gradient, so any style can have it);
+    -- Pulse = on throbs the bar below half health, faster as it drops.
+    local function on(v) v = tostring(v or ""):lower() return v == "on" or v == "true" or v == "1" or v == "yes" end
+    local bgRaw = tostring(conf.background or ""):lower()
+    local bgDark = bgRaw == "dark"
+    local bgCol = not bgDark and rgbOf(bgRaw, nil) or nil
+    local shine, pulse = on(conf.shine), on(conf.pulse)
+    -- Extras on the game's own bar: its green-to-red colours, painted by us.
+    if style == "default" and (shine or pulse or bgCol or bgDark) then style = "health" end
     local function gradColor(t)
         if rainbowGrad then
             local c = Color3.fromHSV(t % 1, 0.85, 1)
@@ -5679,8 +6005,10 @@ Delta.health = function()
             if rd(bar.bar + off) == ca then return off - 0x30, off - 8 end
         end
     end
+    local GC, GT = _G.__RSC_GRADOFF()
     local function stops(g)
-        local p, n = rd(g + 0xf8), mrd("int", g + 0x100)
+        if not GC then return nil end
+        local p, n = rd(g + GC), mrd("int", g + GC + 8)
         if not p or p < 0x10000 or not n or n < 2 or n > 64 then return nil end
         local t0, t1 = mrd("float", p), mrd("float", p + (n - 1) * 20)
         if t0 ~= 0 or t1 ~= 1 then return nil end
@@ -5724,7 +6052,7 @@ Delta.health = function()
             mwr("byte", bar.bar + flag, 1)
         end
         -- Opaque all along.
-        local tp, tn = rd(g + 0xb8), mrd("int", g + 0xc0)
+        local tp, tn = rd(g + GT), mrd("int", g + GT + 8)
         if tp and tp > 0x10000 and tn and tn > 0 and tn < 64 then
             for i = 0, tn - 1 do mwr("float", tp + i * 12 + 4, 0) end
         end
@@ -5743,7 +6071,7 @@ Delta.health = function()
         for i = 0, (n or 0) - 1 do
             for j = 1, 3 do mwr("float", p + i * 20 + j * 4, 1) end
         end
-        local tp, tn = rd(g + 0xb8), mrd("int", g + 0xc0)
+        local tp, tn = rd(g + GT), mrd("int", g + GT + 8)
         if tp and tp > 0x10000 and tn and tn > 0 and tn < 64 then
             for i = 0, tn - 1 do mwr("float", tp + i * 12 + 4, 0) end
         end
@@ -5765,15 +6093,20 @@ Delta.health = function()
         restore()
         return
     end
-    if style ~= "gradient" and bar then pcall(unlink, bar) end
+    local wantGrad = style == "gradient" or shine
+    if not wantGrad and bar then pcall(unlink, bar) end
 
     local grad
-    if style == "gradient" and bar then
+    if wantGrad and bar then
         local okL, l = pcall(link, bar)
         grad = okL and l or nil
-        if not grad then
+        if not grad and style == "gradient" then
             print("[RivalsSkinChanger] Health bar: couldn't link a gradient on this Roblox build - using Color1 instead")
             style, fixed = "color", g1
+        end
+        if not grad and shine then
+            print("[RivalsSkinChanger] Health bar: couldn't link a gradient on this Roblox build - no shine")
+            shine = false
         end
     end
 
@@ -5798,7 +6131,7 @@ Delta.health = function()
     end
     if bar and not holdBar(bar) then bar = nil end
 
-    local acc = 0
+    local acc, fpsAcc, pulsePhase, shinePos = 0, 0, 0, 0
     local conn
     conn = game:GetService("RunService").Heartbeat:Connect(function(dt)
         if _G.__RSC_HPBAR ~= token or game.JobId ~= job then
@@ -5817,46 +6150,89 @@ Delta.health = function()
                 bar = b
                 grad = nil
             end
-            if style == "gradient" and bar and not grad then
+            if (style == "gradient" or shine) and bar and not grad then
                 local okL, l = pcall(link, bar)
                 grad = okL and l or nil
             end
         end
         if not bar then return end
+        -- FPS-friendly mode: the colours 10 times a second.
+        if _G.__RSC_FPS then
+            fpsAcc = fpsAcc + (dt or 1 / 60)
+            if fpsAcc < 0.1 then return end
+            fpsAcc = 0
+        end
         pcall(function()
-            if style == "gradient" then
-                if not grad then return end
+            local step = _G.__RSC_FPS and 0.1 or (dt or 1 / 60)
+            -- The pulse: brightness 0.6-1 below half health, its speed going
+            -- from 1 to 4 beats a second as health drops (phase kept so a
+            -- speed change doesn't jump).
+            local bright = 1
+            if pulse then
+                local hp = fraction(bar)
+                if hp > 0 and hp < 0.5 then
+                    pulsePhase = (pulsePhase + step * (1 + 6 * (0.5 - hp))) % 1
+                    bright = 0.6 + 0.4 * (0.5 + 0.5 * math.cos(2 * math.pi * pulsePhase))
+                else
+                    pulsePhase = 0
+                end
+            end
+            local function lit(c) return {c[1] * bright, c[2] * bright, c[3] * bright} end
+            -- The fill: one colour, or (gradient style) a colour along the bar.
+            local base
+            if style == "rainbow" then
+                local col = Color3.fromHSV((tick() * 0.25 * speed) % 1, 0.8, 1)
+                base = {col.R, col.G, col.B}
+            elseif style == "health" then
+                base = byHealth(low, mid, full, fraction(bar))
+            elseif style ~= "gradient" then
+                base = fixed
+            end
+            local ph = tick() * 0.4 * speed
+            local span = rainbowGrad and 0.6 or 0.5
+            local function along(t) return base or gradColor(t * span - ph) end
+            -- The backing frames (the bar's container and background).
+            local function backing(k, mid)
+                if bgCol then return {bgCol[1] * (k == 2 and 1 or 0.75), bgCol[2] * (k == 2 and 1 or 0.75), bgCol[3] * (k == 2 and 1 or 0.75)} end
+                local f = bar.frames[k][2] * (bgDark and 0.35 or 1)
+                return {mid[1] * f, mid[2] * f, mid[3] * f}
+            end
+            if grad and (style == "gradient" or shine) then
                 local p, n = stops(grad.g)
                 if not p then return end
-                local ph = tick() * 0.4 * speed
-                local span = rainbowGrad and 0.6 or 0.5
+                shinePos = (shinePos + step * 0.6) % 1.6
                 for i = 0, n - 1 do
-                    local c = gradColor(mrd("float", p + i * 20) * span - ph)
+                    local t = mrd("float", p + i * 20)
+                    local c = lit(along(t))
+                    if shine then
+                        local k = math.max(0, 1 - math.abs(t - (shinePos - 0.3)) / 0.12) * 0.75
+                        c = {c[1] + (1 - c[1]) * k, c[2] + (1 - c[2]) * k, c[3] + (1 - c[3]) * k}
+                    end
                     for j = 1, 3 do mwr("float", p + i * 20 + j * 4, c[j]) end
                 end
-                -- White under the gradient; the frame and its inside take its
-                -- middle colour, darker, as the game does.
-                local m = gradColor(span / 2 - ph)
+                -- White under the gradient; the backing takes the middle
+                -- colour, darker, as the game does (or the Background colour).
+                local m = lit(along(0.5))
                 for k, f in ipairs(bar.frames) do
-                    local c = k == 1 and {1, 1, 1} or m
-                    for i = 0, 2 do mwr("float", f[1] + O.col + i * 4, c[i + 1] * f[2]) end
+                    local c = k == 1 and {1, 1, 1} or backing(k, m)
+                    for i = 0, 2 do mwr("float", f[1] + O.col + i * 4, c[i + 1]) end
                 end
                 return
             end
-            local c
-            if style == "rainbow" then
-                local col = Color3.fromHSV((tick() * 0.25 * speed) % 1, 0.8, 1)
-                c = {col.R, col.G, col.B}
-            elseif style == "health" then
-                c = byHealth(low, mid, full, fraction(bar))
-            else
-                c = fixed
+            local c = lit(base or g1)
+            for k, f in ipairs(bar.frames) do
+                local col = k == 1 and c or backing(k, c)
+                for i = 0, 2 do mwr("float", f[1] + O.col + i * 4, col[i + 1]) end
             end
-            paint(bar, c)
         end)
     end)
     _G.__RSC_HPBAR_CONN = conn
-    print("[RivalsSkinChanger] Health bar: " .. (conf.label or style) .. (bar and "" or ", once the bar shows up") .. " - only you see it")
+    local extras = {}
+    if bgCol or bgDark then extras[#extras + 1] = bgDark and "dark background" or "own background" end
+    if shine then extras[#extras + 1] = "shine" end
+    if pulse then extras[#extras + 1] = "pulse at low health" end
+    print("[RivalsSkinChanger] Health bar: " .. (conf.label or style) .. (#extras > 0 and (" + " .. table.concat(extras, ", ")) or "")
+        .. (bar and "" or ", once the bar shows up") .. " - only you see it")
 end
 pcall(Delta.health)
 
@@ -5872,6 +6248,7 @@ pcall(Delta.health)
 -- scope is set up when your loadout's UI is built, so it shows from your
 -- next respawn.
 Delta.scopes = function()
+    if QUICK then return end -- a quick apply keeps the last run's scopes
     local function tstr(p)
         if not p or p < 0x10000 then return nil end
         local okL, len = pcall(mrd, "int", p + 20)
@@ -6019,8 +6396,10 @@ Delta.buttons = function()
         return {math.min(1, c[1] * k + (1 - c[1] * k) * w), math.min(1, c[2] * k + (1 - c[2] * k) * w),
             math.min(1, c[3] * k + (1 - c[3] * k) * w)}
     end
+    local GC = _G.__RSC_GRADOFF()
     local function stopsOf(g)
-        local p, n = rd(g + 0xf8), mrd("int", g + 0x100)
+        if not GC then return nil end
+        local p, n = rd(g + GC), mrd("int", g + GC + 8)
         if p and p > 0x10000 and n and n >= 3 and n <= 4 then return p, n end
     end
 
@@ -6083,6 +6462,7 @@ end
 pcall(Delta.buttons)
 
 -- Save state
+_G.__RSC_LAST_QUICK = QUICK and true or nil
 _G.__RIVALS_SKIN_CHANGER_STATE ={restores = memoryRestores, wfAddr = wf.Address, jobId = game.JobId, nameCopies = nameCopies, dicts = dictCache, floats = floatRestores}
 saveUndo()
 _G.__RIVALS_SKIN_CHANGER_BUSY = nil
@@ -6100,9 +6480,11 @@ pcall(function()
     notifyUser("Rivals Skin Changer", #probs .. " problem" .. (#probs == 1 and "" or "s") .. " - see the Health line in the console", 8)
 end)
 
+
 -- Incremental apply, bound to this engine's live session and undo records.
 -- No saved process pointers are used across jobs or asset-folder replacements.
 function Delta.snapshot(text)
+    text = Delta.prepare(text)
     local result = {groups = {}, names = {}, values = {}, wraps = {}}
     local section = "skins"
     local function add(group, line, names)
@@ -6146,7 +6528,7 @@ function Delta.snapshot(text)
     end
     -- Same precedence as readWrapPairs: config, then the first auxiliary file.
     for _, path in ipairs({"rivals_wraps.lua", "rivals_wraps.txt", "workspace/rivals_wraps.lua", "workspace/rivals_wraps.txt"}) do
-        if isfile(path) then
+        if text:sub(1, 8) ~= "-- panic" and isfile(path) then
             local body = readfile(path)
             for line in body:gmatch("[^\r\n]+") do
                 local key, value = line:match("^%s*([^=%-][^=]-)%s*=%s*(.-)%s*$")
@@ -6237,7 +6619,7 @@ end
 do
     local owner = _G.__RIVALS_SKIN_CHANGER_STATE
     local jobId, gameAddress = game.JobId, game.Address
-    owner.deltaVersion = "3.9"
+    owner.deltaVersion = "4.0"
     Delta.last = Delta.snapshot(Delta.text or "")
     if #(_G.__RSC_PROBLEMS or {}) > 0 then
         Delta.pending = {}

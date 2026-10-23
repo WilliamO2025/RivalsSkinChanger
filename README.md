@@ -1,4 +1,4 @@
-# Rivals Skin Changer 3.9
+# Rivals Skin Changer 4.0
 
 Hybrid of Martini's FULLMATCHA GUI/engine and our loader improvements. Open with:
 
@@ -15,6 +15,11 @@ Right Shift opens/hides the GUI. Pick a weapon or cosmetic, then **Save & Apply*
 - Hit/headshot/kill sounds, tracer colour/speed, and upstream local spoof controls.
 - 420px skin sources where available, falling back to the site's artwork.
 - Bundled engine, previous-GUI cleanup, guarded memory access and config backups.
+- Favorites, recent selections, sorting/rarity/owned filters and new items read from the game.
+- Config history/restore, share codes/import, inventory export and a support log.
+- Themes, lighting fine-tuning and health-bar shine, pulse and backing colors.
+- Optional panic key, skins-only mode and FPS-friendly live effects.
+- Changed-items-only Apply and a queued Reload script button under Unload.
 
 ## Automatic startup on every join
 
@@ -25,6 +30,8 @@ Leave **Auto-apply on join** enabled in Settings. Saved configuration lives in r
 A normal loadstring cannot recreate a script VM after the host clears it. The autoexec launcher is the host-supported path described by upstream.
 
 ## Upgrading
+
+**Rejoin once when upgrading to 4.0.** The new Roblox layout fixes and engine helpers cannot replace an already-running 3.9 engine through a GUI-only reload. The existing autoexec launcher fetches the current GUI on the next join; no launcher reinstall is needed.
 
 An active 2.x GUI is stopped and restored before this GUI opens. When no rivals_config.lua exists, our saved non-default selections are imported. Existing configs are preserved. The prior GUI remains available as legacy/skin-gui-2.4.lua. Use one version at a time; rejoin before switching back to the legacy engine. Old pinned loadstrings keep loading their old commit; use the updated URL above.
 
@@ -101,3 +108,11 @@ Validation: isolated tests execute the actual model-swap and dictionary-sync hel
 ## October 21 — Reload button fix 3.9.1
 
 Reload is clickable while an operation is busy and shows “Waiting for apply…” after being queued. It waits for both the GUI job and engine apply lock before downloading and restarting. Repeated clicks do not start duplicate reloads. Failed downloads leave the current GUI running and allow another attempt. Tested through actual simulated mouse clicks, including both busy locks and successful replacement; live Matcha behavior remains unverified. Run the loadstring once or rejoin to replace the old disabled button.
+
+## October 22 — upstream feature update 4.0
+
+Merged FULLMATCHA `68f42abf4968e96a100a9f3a3f58b3db4f916a0a`, including its Roblox module-thread/registry-slot detection, gradient lookup and tracer-speed fixes. Added favorites/recent picks, filters, live-game catalog additions, config history/sharing/import/export, progress and logs, notification controls, themes, lighting tuning, health-bar extras, panic reset, skins-only mode and FPS-friendly effects.
+
+Our resident incremental Apply remains the only apply path after initialization; upstream's separate quick-run path is disabled to avoid conflicting undo ownership. Theme and skins-only transformations feed the same diff planner used for applying. Panic restores changes without overwriting the saved config and ignores auxiliary wraps for that reset. Save & Apply brings selections back. Reload, artwork pacing, corner resizing and conditional host wheel support remain.
+
+Validated with isolated GUI mouse/scheduler tests, all Settings pages, actual swap/sync helpers, theme-only changes, mode changes, panic/default restoration, current and older memory-layout fixtures, startup/offset tests, and failed-download reload recovery. Live Roblox/Matcha functionality and FPS improvements are not verified. “Safe mode” limits enabled features; it is not a detection or account-safety guarantee.

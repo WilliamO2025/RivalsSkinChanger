@@ -1,6 +1,8 @@
-# Rivals Skin Changer 4.0.1
+# Rivals Skin Changer 4.1
 
 Hybrid of Martini's FULLMATCHA GUI/engine and our loader improvements. Open with:
+
+October 31: merged FULLMATCHA b6db28c5672f7982a830bee3f30d37476d04788a. Adds three custom wraps (Misc > Wraps), Custom rarity/filter, cached sorting, new Roblox module/tracer/scope layouts, conditional lighting restoration, and placed Jump Pad/Flamingo Floatie fixes. Retains changed-item Apply, queued Reload and Low/HD artwork. Custom wrap edits refresh the connected wrap set without rewriting unrelated skins. Rejoin once to upgrade the resident engine; the existing autoexec fetches the latest version. Isolated GUI, wrap/reset, conditional undo, launcher and layout/offset tests passed; live Matcha behavior remains unverified.
 
 ```lua
 loadstring(game:HttpGet("https://raw.githubusercontent.com/WilliamO2025/RivalsSkinChanger/main/skin-gui.lua"))()

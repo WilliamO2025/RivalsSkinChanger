@@ -1,4 +1,4 @@
--- Rivals Skin Changer 4.0.1; upstream Martini; see UPSTREAM.md for credits.
+-- Rivals Skin Changer 4.1; upstream Martini; see UPSTREAM.md for credits.
 
 -- Upgrade from our 2.x GUI. Only our own state and preferences are consulted.
 local old = _G.__RIVALS_SKIN_GUI
@@ -1548,6 +1548,7 @@ local configSpoof = {}
 local configLighting = {}
 local configTracers = {}
 _G.__RSC_HPBAR_CFG = {} -- [Health Bar]; a global, the main chunk is at its local limit
+_G.__RSC_CW_CFG = {} -- [CustomWrap1..3]: what each custom wrap is made of
 _G.__RSC_BTN_CFG = {} -- [Buttons]
 -- Where a UIGradient keeps its colour stops (list pointer, then the count 8
 -- bytes on; 20-byte stops: time, r, g, b, envelope) and its transparency
@@ -1853,6 +1854,7 @@ local MISC_SPECIAL_MAP = {
     ["Glorious Jump Pad"] = { JumpPads = "Glorious Jump Pad" },
     ["Spider Web"] = { JumpPads = "Spider Web" },
     ["Jolly Man"] = { JumpPads = "Jolly Man" },
+    ["Flamingo Floatie"] = { JumpPads = "Flamingo Floatie" },
     ["Electropunk Warper"] = { Portals = "Electropunk Warper" },
     ["Experiment W4"] = { Portals = "Experiment W4" },
     ["Glitter Warper"] = { Portals = "Glitter Warper" },
@@ -2390,10 +2392,11 @@ end
 -- thread keeps its global state. Build 02c37bc (Sep 30 2026) had tt +1,
 -- lsizenode +4, global state +0x68; cec3ad5 (Oct 2026) moved tt back to +0.
 -- So they are found at runtime (ROUTE.detect) instead of being hard-coded.
--- Defaults: Roblox build 9ac8595 (ModuleScript thread +0x150, registry slot
--- +0x170, thread tag at byte +2); ROUTE.detect looks again when they don't fit.
-local ROUTE = {thread = 0x150, slot = 0x170, globalState = 0x78, registry = 0x618, node = 0x18, array = 0x20,
-    sizearray = 8, tt = 2, lsize = 4}
+-- Defaults: Roblox build 5a21b87 (ModuleScript thread +0x168, registry slot
+-- +0x170, tag at byte +1, global state +0x38, array +0x28); ROUTE.detect
+-- looks again when they don't fit.
+local ROUTE = {thread = 0x168, slot = 0x170, globalState = 0x38, registry = 0x618, node = 0x18, array = 0x28,
+    sizearray = 8, tt = 1, lsize = 4}
 local TAG_TABLE, TAG_THREAD = 7, 10
 
 local function rbyte(a) local ok, v = pcall(mrd, "byte", a) return ok and v or nil end
@@ -2821,9 +2824,108 @@ function Delta.write(slot, value)
     mwr("uintptr_t", slot, value)
 end
 -- Animations, offsets, icons, wraps
+-- Custom wraps: writes kept in _G so the next run can put them back, each only
+-- where the address still holds what was written.
+local CW_BASES = {{"Bubbles", "Bright"}, {"Sea Glass", "Hologram"}, {"Rivalry", "Dark"}}
+local function cwBase(n, cw)
+    local pat = tostring(cw.pattern or ""):lower()
+    local b = CW_BASES[n]
+    return b and ((pat ~= "" and pat ~= "none") and b[1] or b[2]) or nil
+end
+local CW_MATERIALS = {neon = "Bright", forcefield = "Mesh", glass = "Copper", metal = "Cold Metal",
+    smoothplastic = "Beige", plastic = "Classic"}
+local function cwWrite(kind, addr, value)
+    local okO, old = pcall(mrd, kind, addr)
+    if not okO or old == nil then return false end
+    if not pcall(mwr, kind, addr, value) then return false end
+    local okB, back = pcall(mrd, kind, addr)
+    local undo = _G.__RSC_CW_UNDO or {}
+    undo[#undo + 1] = {kind, addr, old, okB and back or value}
+    _G.__RSC_CW_UNDO = undo
+    return true
+end
+local function cwUndo()
+    local undo = _G.__RSC_CW_UNDO
+    _G.__RSC_CW_UNDO = nil
+    for i = #(type(undo) == "table" and undo or {}), 1, -1 do
+        local u = undo[i]
+        local okN, now = pcall(mrd, u[1], u[2])
+        if okN and now == u[4] then pcall(mwr, u[1], u[2], u[3]) end
+    end
+end
+local function applyCustomWraps(cos, cache)
+    if Delta.changed then
+        local touched = false
+        for k in pairs(Delta.changed) do if k:match("^customwrap") or k:match("^wrap:") then touched = true; break end end
+        if not touched then return end
+    end
+    local cfg = _G.__RSC_CW_CFG or {}
+    if not next(cfg) then return end
+    local want = {}
+    for _, name in pairs(CW_MATERIALS) do want[name] = true end
+    for n, cw in pairs(cfg) do
+        local base = cwBase(n, cw)
+        if base then want[base] = true end
+        local pat = tostring(cw.pattern or "")
+        if pat ~= "" and pat:lower() ~= "none" then want[pat] = true end
+    end
+    local nodes = cache.cosBase and walkNodes(cache.cosBase, cache.cosCount or 16384, want) or (cos and walkAround(cos, 4096, want)) or {}
+    local FIELDS = {Color = true, Material = true, Transparency = true, Textures = true}
+    -- The fields of each group of a wrap: {{Color = node, ...}, ...}
+    local function groupsOf(name)
+        local node = nodes[name]
+        local f = node and tableFields(rd(node), 32, WRAP_FIELDS)
+        local g = f and f.WrapGroups and rd(f.WrapGroups)
+        local size, arr = g and rint(g + ROUTE.sizearray), g and rd(g + ROUTE.array)
+        local out = {}
+        if size and arr and size >= 1 and size <= 8 and arr > 0x10000 then
+            for i = 0, size - 1 do
+                local t = rd(arr + i * 16)
+                if t and t > 0x10000 and rbyte(t + ROUTE.tt) == TAG_TABLE then
+                    out[#out + 1] = tableFields(t, 32, FIELDS)
+                end
+            end
+        end
+        return out
+    end
+    for n, cw in pairs(cfg) do
+        local base = cwBase(n, cw)
+        local groups = base and groupsOf(base) or {}
+        local pat = tostring(cw.pattern or "")
+        local patStr
+        if pat ~= "" and pat:lower() ~= "none" then
+            for _, g in ipairs(groupsOf(pat)) do
+                if g.Textures then patStr = rd(g.Textures) break end
+            end
+            if not patStr then print("[RivalsSkinChanger] Custom wrap " .. n .. ": " .. pat .. " has no pattern to borrow") end
+        end
+        local done = 0
+        for i = 1, 3 do
+            local g = groups[i]
+            if g then
+                local hex = tostring(cw["color" .. i] or ""):gsub("^#", ""):lower()
+                local ud = g.Color and rd(g.Color)
+                if hex:match("^%x%x%x%x%x%x$") and ud and ud > 0x10000 then
+                    for c = 0, 2 do cwWrite("float", ud + 16 + c * 4, tonumber(hex:sub(c * 2 + 1, c * 2 + 2), 16) / 255) end
+                end
+                local src = CW_MATERIALS[tostring(cw["material" .. i] or ""):lower()]
+                local from = src and groupsOf(src)[1]
+                local mat = from and from.Material and rd(from.Material)
+                if mat and mat > 0x10000 and g.Material then cwWrite("uintptr_t", g.Material, mat) end
+                local tr = tonumber(cw["transparency" .. i])
+                if tr and tr >= 0 and tr <= 1 and g.Transparency then cwWrite("double", g.Transparency, tr) end
+                if patStr and patStr > 0x10000 and g.Textures then cwWrite("uintptr_t", g.Textures, patStr) end
+                done = done + 1
+            end
+        end
+        print("[RivalsSkinChanger] Custom wrap " .. n .. ": " .. tostring(cw.replace or "used from your wrap list") .. " (" .. done .. " groups on " .. tostring(base)
+            .. ") - shows on your next match or when you re-enter an area")
+    end
+end
+
 local function syncSkinData(pairList, wrapPairs, cache)
-    if #pairList == 0 and #wrapPairs == 0 then return 0 end
-    local vm, cos, err = findDictionaries(cache, #pairList > 0, #wrapPairs > 0)
+    if #pairList == 0 and #wrapPairs == 0 and not next(_G.__RSC_CW_CFG or {}) then return 0 end
+    local vm, cos, err = findDictionaries(cache, #pairList > 0, #wrapPairs > 0 or next(_G.__RSC_CW_CFG or {}) ~= nil)
     if #pairList > 0 and not vm and #wrapPairs > 0 and not cos then return 0, err or "item dictionaries not found" end
 
     local vmWanted, cosWanted = {}, {}
@@ -2874,6 +2976,7 @@ local function syncSkinData(pairList, wrapPairs, cache)
             wrapsMissed[#wrapsMissed + 1] = p[1] .. "=" .. p[2]
         end
     end
+    pcall(applyCustomWraps, cos, cache)
     local note = (#missed > 0) and ("not found: " .. table.concat(missed, ", ")) or err
     return synced, note, wrapsApplied, wrapsMissed, missed
 end
@@ -2989,6 +3092,7 @@ function Delta.prepare(r2)
 end
 
 local function applySkinSwapper()
+    _G.__RSC_CW_CFG, _G.__RSC_CW_CUR = {}, nil
     skinDataPairs, renamedScripts = {}, {}
     configWrapPairs, configFinishers, configCharms = {}, {}, {}
     configSkybox, configSounds, configSpoof = {}, {}, {}
@@ -3134,8 +3238,13 @@ local function applySkinSwapper()
         local header = rawLine:gsub(string.char(13), ""):match("^%s*%[%s*(.-)%s*%]%s*$")
         if header then
             local h = header:lower()
+            local cwSlot = tonumber(h:match("^customwrap%s*(%d)$"))
+            if cwSlot then
+                _G.__RSC_CW_CFG[cwSlot] = _G.__RSC_CW_CFG[cwSlot] or {}
+                _G.__RSC_CW_CUR = cwSlot
+            end
 
-            section = h:find("health") and "healthbar" or h:find("button") and "buttons" or h:find("wrap") and "wraps" or (h:find("sky") and "skybox"
+            section = h:find("customwrap") and "customwrap" or h:find("health") and "healthbar" or h:find("button") and "buttons" or h:find("wrap") and "wraps" or (h:find("sky") and "skybox"
                 or (h:find("light") and "lighting" or (h:find("finisher") and "finishers"
                 or (h:find("charm") and "charms" or (h:find("sound") and "sounds"
                 or (h:find("spoof") and "spoof" or (h:find("tracer") and "tracers" or (h:find("hand") and "nohands"
@@ -3175,6 +3284,10 @@ local function applySkinSwapper()
         elseif section == "buttons" then
             local key, value = parseConfigLine(rawLine)
             if key and value then _G.__RSC_BTN_CFG[key:lower()] = value end
+        elseif section == "customwrap" then
+            local key, value = parseConfigLine(rawLine)
+            local cw = _G.__RSC_CW_CFG[_G.__RSC_CW_CUR or 0]
+            if cw and key and value then cw[key:lower()] = value end
         else
             local weaponName, skinTarget = parseConfigLine(rawLine)
             if weaponName and skinTarget then
@@ -3342,7 +3455,10 @@ local function applySkinSwapper()
                             local folder = mi:FindFirstChild(folderName)
                             if folder then
 
+                                -- These folders belong to one item, whose plain look is
+                                -- named Default (JumpPads), not after the weapon.
                                 local weaponItem = folder:FindFirstChild(srcName)
+                                    or (not ownedSwap and folder:FindFirstChild("Default")) or nil
                                 local skinItem = folder:FindFirstChild(itemName)
                                 if skinItem and weaponItem then
                                     swapTwoWay(weaponItem, skinItem, folder)
@@ -3700,14 +3816,35 @@ pcall(function()
 end)
 
 -- Wraps
+-- Custom wraps: the game paints a wrap from its WrapGroups, each group a table
+-- with Color, Material, Transparency and Textures (an image folder's name). So
+-- owned wraps are swapped to a base wrap and the base's groups are rewritten
+-- (see applyCustomWraps) before the game paints them. Fields can be changed,
+-- not added, so a wrap with a pattern needs a base that has Textures. Each of
+-- the 3 slots has its own pair of bases.
 local function readWrapPairs()
     if (Delta.text or ""):sub(1, 8) == "-- panic" then return {} end
     local list, seen = {}, {}
-
+    for n, cw in pairs(_G.__RSC_CW_CFG or {}) do
+        local base = cwBase(n, cw)
+        for owned in tostring(cw.replace or ""):gmatch("[^,]+") do
+            owned = owned:match("^%s*(.-)%s*$")
+            if base and owned ~= "" and not seen[owned] then
+                seen[owned] = true
+                list[#list + 1] = {owned, base}
+            end
+        end
+    end
     for _, p in ipairs(configWrapPairs) do
         if not seen[p[1]] then
-            seen[p[1]] = true
-            list[#list + 1] = p
+            -- "Owned=Custom Wrap 2" uses that custom wrap's base.
+            local n = tonumber(tostring(p[2]):match("^[Cc]ustom [Ww]rap (%d)$"))
+            local cw = n and (_G.__RSC_CW_CFG or {})[n]
+            local target = n and (cw and cwBase(n, cw)) or (not n and p[2]) or nil
+            if target then
+                seen[p[1]] = true
+                list[#list + 1] = {p[1], target}
+            end
         end
     end
     for _, p in ipairs({"rivals_wraps.lua", "rivals_wraps.txt", "workspace/rivals_wraps.lua", "workspace/rivals_wraps.txt"}) do
@@ -5028,35 +5165,38 @@ local function lightingColor(v)
     if n then return n, n, n end
 end
 
-function Delta.lightWrite(kind, address, value)
-    Delta.lightUndo = Delta.lightUndo or {}
-    local key = kind .. ":" .. tostring(address)
-    if not Delta.lightUndo[key] then
-        local old = mrd(kind, address)
-        assert(old ~= nil, "Could not read original lighting field")
-        Delta.lightUndo[key] = {kind, address, old}
-    end
-    mwr(kind, address, value)
-end
 local function applyLighting(conf, cache)
-    local function mwr(kind, address, value) Delta.lightWrite(kind, address, value) end
+
     -- The game's own values, recorded the first time each one is written in
     -- this server and put back at the start of every run, so an emptied
     -- [Lighting] (or the panic key) restores them.
+    -- An original is only put back where the address still holds exactly
+    -- what this changer wrote: the game replaces its lighting values (a map
+    -- change rebuilds them), and writing into memory that has since been
+    -- reused crashed Roblox a minute later.
     local rec = _G.__RSC_LIGHT_ORIG
     if type(rec) ~= "table" or rec.job ~= game.JobId then
         rec = {job = game.JobId, vals = {}}
         _G.__RSC_LIGHT_ORIG = rec
     else
-        for _, v in pairs(rec.vals) do pcall(mwr, v[1], v[2], v[3]) end
+        for key, v in pairs(rec.vals) do
+            local okN, now = pcall(mrd, v[1], v[2])
+            if okN and type(now) == "number" and type(v[4]) == "number" and math.abs(now - v[4]) < 1e-6 then
+                pcall(mwr, v[1], v[2], v[3])
+            end
+            rec.vals[key] = nil
+        end
     end
     local function lw(kind, addr, val)
         local key = kind .. ":" .. tostring(addr)
         if not rec.vals[key] then
             local okO, old = pcall(mrd, kind, addr)
-            if okO and old ~= nil then rec.vals[key] = {kind, addr, old} end
+            if okO and type(old) == "number" then rec.vals[key] = {kind, addr, old} end
         end
         mwr(kind, addr, val)
+        -- What is there now (a float reads back rounded), to compare with later.
+        local okB, back = pcall(mrd, kind, addr)
+        if rec.vals[key] then rec.vals[key][4] = okB and back or nil end
     end
     local values = {}
     local name = conf.preset and tostring(conf.preset):lower()
@@ -5236,9 +5376,10 @@ _G.__RSC_SKY_COLORS = function()
     return #out > 0 and out or nil
 end
 
+if not QUICK then pcall(cwUndo) end
 local wrapPairs = readWrapPairs()
 Delta.sync = function(wrapPairs)
-if ENABLE_SKIN_DATA_SYNC and not QUICK and (#skinDataPairs > 0 or #wrapPairs > 0) then
+if ENABLE_SKIN_DATA_SYNC and not QUICK and (#skinDataPairs > 0 or #wrapPairs > 0 or next(_G.__RSC_CW_CFG or {}) ~= nil) then
     print("[RivalsSkinChanger] Applying skin animations, offsets, icons" .. (#wrapPairs > 0 and " + wraps" or "") .. "...")
     local tSync = tick()
     local okS, synced, note, wrapsApplied, wrapsMissed, skinsMissed = pcall(syncSkinData, skinDataPairs, wrapPairs, dictCache)
@@ -5408,10 +5549,10 @@ local function applyTracersEffect()
             end
             return nil
         end
-        -- Proto layouts: build 9ac8595, 11f155f3, cec3ad5, 02c37bc, then the older one.
+        -- Proto layouts: build 5a21b87, 9ac8595, 11f155f3, cec3ad5, 02c37bc, then the older one.
         -- Every layout is tried for an exact 800 first, so a stray constant on
         -- a wrong layout can't pass for an earlier run's speed.
-        local PATHS = {{0x30, 0x48}, {0x18, 0x20}, {0x48, 0x20}, {0x28, 0x48}, {0x20, 0x38, 8}}
+        local PATHS = {{0x58, 0x80}, {0x30, 0x48}, {0x18, 0x20}, {0x48, 0x20}, {0x28, 0x48}, {0x20, 0x38, 8}}
         local k
         for pass = 1, 2 do
             for _, pth in ipairs(PATHS) do
@@ -6322,7 +6463,7 @@ Delta.scopes = function()
     -- The constants list: the offset moves between Roblox builds, so it's the
     -- one that holds the scope names.
     local k, slots
-    for _, off in ipairs({0x20, 0x48, 0x38, 0x28, 0x30, 0x40, 0x18, 0x50}) do
+    for _, off in ipairs({0x80, 0x20, 0x48, 0x38, 0x28, 0x30, 0x40, 0x18, 0x50, 0x58, 0x60, 0x68, 0x70, 0x78, 0x88}) do
         local arr = proto and proto > 0x10000 and rd(proto + off)
         if arr and arr > 0x10000 then
             local found, n = {}, 0
@@ -6525,7 +6666,7 @@ function Delta.snapshot(text)
         local h = line:gsub("\r", ""):match("^%s*%[%s*(.-)%s*%]%s*$")
         if h then
             h = h:lower()
-            section = h:find("health") and "healthbar" or h:find("button") and "buttons"
+            section = h:match("^customwrap%s*%d$") and h:gsub("%s", "") or h:find("health") and "healthbar" or h:find("button") and "buttons"
                 or h:find("wrap") and "wraps" or h:find("sky") and "skybox"
                 or h:find("light") and "lighting" or h:find("finisher") and "finishers"
                 or h:find("charm") and "charms" or h:find("sound") and "sounds"
@@ -6563,6 +6704,23 @@ function Delta.snapshot(text)
                 if key and value ~= "" and result.wraps[key] == nil then result.wraps[key] = value end
             end
             break
+        end
+    end
+    for n = 1, 3 do
+        local cw = result.values["customwrap" .. n]
+        if cw then
+            local base = cwBase(n, cw)
+            for owned in tostring(cw.replace or ""):gmatch("[^,]+") do
+                owned = owned:match("^%s*(.-)%s*$")
+                if base and owned ~= "" then result.wraps[owned] = base end
+            end
+        end
+    end
+    for owned, target in pairs(result.wraps) do
+        local n = tonumber(target:match("^[Cc]ustom [Ww]rap (%d)$"))
+        if n then
+            local cw = result.values["customwrap" .. n]
+            result.wraps[owned] = cw and cwBase(n, cw) or nil
         end
     end
     for key, value in pairs(result.wraps) do
@@ -6607,6 +6765,15 @@ function Delta.plan(nextState)
             end
         end
     end
+    -- Custom wraps borrow shared base tables. Refresh the wrap set together
+    -- whenever one definition/mapping changes; unrelated skins stay untouched.
+    local wraps = false
+    for k in pairs(changed) do if k:match("^customwrap") or k:match("^wrap:") then wraps = true end end
+    if wraps then
+        for _, snapshot in ipairs({Delta.last, nextState}) do
+            for k in pairs(snapshot.groups) do if k:match("^customwrap") or k:match("^wrap:") then changed[k] = true end end
+        end
+    end
     return changed
 end
 
@@ -6647,7 +6814,7 @@ end
 do
     local owner = _G.__RIVALS_SKIN_CHANGER_STATE
     local jobId, gameAddress = game.JobId, game.Address
-    owner.deltaVersion = "4.0"
+    owner.deltaVersion = "4.1"
     Delta.last = Delta.snapshot(Delta.text or "")
     if #(_G.__RSC_PROBLEMS or {}) > 0 then
         Delta.pending = {}
@@ -6683,6 +6850,9 @@ do
         end
         wr = function(address, value) mwr("uintptr_t", address, value) end
         local ok, err = pcall(function()
+            for k in pairs(changed) do
+                if k:match("^customwrap") or k:match("^wrap:") then cwUndo(); break end
+            end
             Delta.restore(changed)
             local refused = configSkybox.__refused
             Delta.text = text
@@ -6707,8 +6877,7 @@ do
                 assert(not rejected, note or "Skybox was not applied")
             end
             if changed.lighting or (changed.skybox and (configLighting.preset or ""):lower() == "match") then
-                for _, item in pairs(Delta.lightUndo or {}) do mwr(item[1], item[2], item[3]) end
-                Delta.lightUndo = {}
+
                 applyLighting(configLighting, dictCache)
             end
             if changed.sounds then
@@ -6905,6 +7074,7 @@ local RANKS = {"Archnemesis", "Nemesis", "Onyx 3", "Onyx 2", "Onyx 1", "Diamond 
 local RARITY_COLORS = {
     Common = Color3.fromRGB(123, 255, 0), Rare = Color3.fromRGB(0, 221, 255), Legendary = Color3.fromRGB(255, 60, 60),
     Mythical = Color3.fromRGB(129, 133, 242), Unique = Color3.fromRGB(255, 140, 0), Genuine = Color3.fromRGB(127, 163, 90),
+    Custom = Color3.fromRGB(255, 79, 216),
 }
 -- Loadout slot of each weapon; the site's list replaces this when it loads.
 local WEAPON_SLOTS = {}
@@ -7334,7 +7504,7 @@ local readInventory
 local function modFields(ms)
     local L = _G.__RSC_LAYOUT
     if L and L.thread and L.slot then return L.thread, L.slot end
-    for _, pair in ipairs({{0x150, 0x170}, {0x170, 0x178}}) do
+    for _, pair in ipairs({{0x168, 0x170}, {0x150, 0x170}, {0x170, 0x178}}) do
         local okP, p = pcall(memory_read, "uintptr_t", ms.Address + pair[1])
         if okP and p and p > 0x10000 and p < 0x7fffffffffff then
             for b = 0, 3 do
@@ -7358,7 +7528,7 @@ do
     local TAG_STRING, TAG_TABLE, TAG_THREAD = 6, 7, 10
     -- Known builds: 02c37bc (type byte +1) and cec3ad5 (type byte +0).
     local KNOWN = {[2] = {tt = 2, globalState = 0x78, registry = 0x618, lsize = 6, sizearray = 8, array = 0x18, node = 0x20},
-        [1] = {tt = 1, globalState = 0x68, registry = 0x620, lsize = 4, sizearray = 8, array = 0x20, node = 0x18},
+        [1] = {tt = 1, globalState = 0x38, registry = 0x618, lsize = 4, sizearray = 8, array = 0x28, node = 0x18}, -- build 5a21b87
         [0] = {tt = 0, globalState = 0x18, registry = 0x620, lsize = 5, sizearray = 8, array = 0x18, node = 0x10}}
     local L = KNOWN[1]
     local function isTable(t) return t and t > 0x10000 and rbyte(t + L.tt) == TAG_TABLE end
@@ -7741,7 +7911,7 @@ local function apply(panic)
     end
     local previous = _G.__RIVALS_SKIN_CHANGER_STATE
     if previous and previous.wfAddr == context.wf and previous.jobId == game.JobId
-        and previous.deltaVersion == "4.0" and type(previous.applyChanges) == "function" then
+        and previous.deltaVersion == "4.1" and type(previous.applyChanges) == "function" then
         local ok, message = timedCall("Changed settings apply", previous.applyChanges, applying)
         assert(ok, message)
         state.status = panic and "Game look restored. Save & Apply brings your changes back." or message or "Changes applied."
@@ -7750,14 +7920,14 @@ local function apply(panic)
         return
     end
     if previous and previous.wfAddr == context.wf and previous.jobId == game.JobId
-        and previous.deltaVersion == "4.0" and previous.guiConfig == content and previous.guiCleanApply then
+        and previous.deltaVersion == "4.1" and previous.guiConfig == content and previous.guiCleanApply then
         state.status = "No changes to apply."
         return
     end
     state.status = "Applying..."
     assert(not previous or previous.wfAddr ~= context.wf or previous.jobId ~= game.JobId
-        or previous.deltaVersion == "4.0",
-        "Rejoin once to load the updated 4.0 engine and Roblox layout fixes.")
+        or previous.deltaVersion == "4.1",
+        "Rejoin once to load the updated 4.1 engine and Roblox layout fixes.")
     _G.__RSC_CONFIG_OVERRIDE = panic and "-- panic" or nil
     local source, from = changerSource()
     if not compiledChanger then
@@ -8347,8 +8517,8 @@ end
 local prefs = {file = "rivals_gui_lists.txt", favs = {}, recent = {}, sort = 1, rarity = 0, show = 1,
     SHOWS = {"Everything", "Owned", "Favourites"},
     SORTS = {"Default", "A-Z", "Rarity", "Recent"},
-    RARITIES = {"Common", "Rare", "Legendary", "Mythical", "Unique", "Genuine"},
-    RANK = {Common = 1, Rare = 2, Legendary = 3, Mythical = 4, Unique = 5, Genuine = 6}}
+    RARITIES = {"Common", "Rare", "Legendary", "Mythical", "Unique", "Genuine", "Custom"},
+    RANK = {Common = 1, Rare = 2, Legendary = 3, Mythical = 4, Unique = 5, Genuine = 6, Custom = 7}}
 function prefs.load()
     local ok, body = pcall(readfile, prefs.file)
     if not ok or type(body) ~= "string" then return end
@@ -8358,6 +8528,7 @@ function prefs.load()
     end
 end
 function prefs.save()
+    prefs.version = (prefs.version or 0) + 1
     local out = {}
     for name in pairs(prefs.favs) do out[#out + 1] = "fav=" .. name end
     table.sort(out)
@@ -8370,8 +8541,30 @@ function prefs.used(name)
     prefs.recent[13] = nil
     prefs.save()
 end
--- The items as the grid shows them; "None" stays first.
+-- The items as the grid shows them; "None" stays first. Callers build their
+-- lists every frame, so the result is reused while the list (by its names),
+-- the sort, the filters and the favourites are the same.
+prefs.version = 0
 function prefs.arrange(items)
+    local n = #items
+    local key = n .. "|" .. prefs.sort .. "|" .. prefs.rarity .. "|" .. prefs.show .. "|" .. prefs.version .. "|"
+        .. tostring(inventory ~= nil) .. "|" .. (n > 0 and (items[1].name .. "|" .. items[n].name .. "|" .. items[math.ceil(n / 2)].name) or "")
+    local c = prefs.cache
+    if c and c.key == key then
+        -- Same names in the same places: hand back these items in the cached order.
+        local byName = {}
+        for _, it in ipairs(items) do byName[it.name] = it end
+        local out = {}
+        for i, name in ipairs(c.names) do out[i] = byName[name] end
+        if #out == #c.names then return out end
+    end
+    local result = prefs.arrangeNow(items)
+    local names = {}
+    for i, it in ipairs(result) do names[i] = it.name end
+    prefs.cache = {key = key, names = names}
+    return result
+end
+function prefs.arrangeNow(items)
     local want = prefs.RARITIES[prefs.rarity]
     local recentAt = {}
     for i, name in ipairs(prefs.recent) do recentAt[name] = i end
@@ -8802,6 +8995,21 @@ local function drawCosmetics(x, y, w, h)
     textbox(tsid, rx + 12, gy, rw - 24, 28, "Search looks like...")
     gy = gy + 38
     local items, tq = {{name = "None", none = true}}, query(tsid)
+    -- Custom wraps built on the Wraps tab, listed like any other wrap.
+    if kind.key == "wraps" then
+        for n = 1, 3 do
+            local cw = state.values["customwrap" .. n]
+            local built = cw and next(cw) ~= nil
+            if matches(tq, "custom wrap " .. n) then
+                local colors = {}
+                for k = 1, 3 do
+                    local ok, c = pcall(Color3.fromHex, "#" .. tostring(built and (cw["Color" .. k] or cw.Color1) or "2a2d38"))
+                    if ok then colors[#colors + 1] = c end
+                end
+                items[#items + 1] = {name = "Custom Wrap " .. n, rarity = "Custom", colors = colors, unbuilt = not built, slot = n}
+            end
+        end
+    end
     for _, item in ipairs(list) do
         if item.name ~= owned and matches(tq, item.name) then item.own = true; items[#items + 1] = item end
     end
@@ -8810,7 +9018,11 @@ local function drawCosmetics(x, y, w, h)
         return it.name == target or (season ~= nil and it.name == season)
     end)
     if hit then
-        if hit.none then
+        if hit.unbuilt then
+            -- Nothing to wear yet: straight to its builder.
+            state.tab, state.miscTab, state.cwSlot = "Misc", 8, hit.slot
+            state.status = "Build Custom Wrap " .. hit.slot .. " here, then pick it in Cosmetics."
+        elseif hit.none then
             setMapping(kind.section, owned, nil)
         elseif kind.key == "charms" and hit.name:match("^Season %d+$") then
             guarded(function() setMapping("charms", owned, hit.name .. " " .. (state.rank[owned] or RANKS[1])) end, hit.name)
@@ -9680,10 +9892,107 @@ function THEMES.draw(x, y, w, h)
         cx, y + h - 30, C.faint, 12, 5)
 end
 
+-- Custom wraps ([CustomWrap1..3]): up to 3 wraps of your own. Each replaces
+-- wraps you own and sets a material, colour and transparency for the 3 parts of
+-- a wrap, with one pattern borrowed from any wrap in the game.
+THEMES.CW = {MATS = {"Neon", "ForceField", "Glass", "Metal", "SmoothPlastic"}, TRANS = {0, 0.25, 0.5, 0.75},
+    PARTS = {"Main", "Second", "Accent"},
+    PRESETS = {{"Neon", {"Neon", 0}, nil}, {"Hologram", {"Neon", 0.6}, nil}, {"Mesh", {"ForceField", 0}, "Mesh"}}}
+function THEMES.drawWraps(x, y, w, h)
+    local CW = THEMES.CW
+    local slot = state.cwSlot or 1
+    local key = "customwrap" .. slot
+    local values = state.values[key] or {}
+    local lw = 230
+    rect(x, y, lw, h, C.panel, 2, 8)
+    local leftTab = state.cwLeft or 1
+    local lt = segmented(x + 8, y + 8, lw - 16, 26, {"Replaces", "Pattern"}, leftTab)
+    if lt and lt ~= leftTab then state.cwLeft, leftTab = lt, lt; resetScroll("cwList") end
+    local on, list = {}, {}
+    for name in tostring(values.Replace or ""):gmatch("[^,]+") do
+        name = trim(name)
+        if name ~= "" then on[name] = true; list[#list + 1] = name end
+    end
+    local names = {}
+    if leftTab == 2 then names[1] = "None" end
+    for _, item in ipairs(catalog.wraps or {}) do
+        if leftTab == 2 or on[item.name] or not ownedOnly() or owns(item.name) then names[#names + 1] = item.name end
+    end
+    local pattern = values.Pattern or "None"
+    local picked = sideList("cwList", x + 8, y + 42, lw - 22, h - 50, names, leftTab == 2 and pattern or "",
+        function(n) if leftTab == 2 then return n == pattern and n ~= "None" end return on[n] end)
+    if picked and leftTab == 2 then
+        setMapping(key, "Pattern", picked ~= "None" and picked or nil)
+    elseif picked then
+        if on[picked] then
+            for i = #list, 1, -1 do if list[i] == picked then table.remove(list, i) end end
+        else
+            list[#list + 1] = picked
+        end
+        setMapping(key, "Replace", #list > 0 and table.concat(list, ",") or nil)
+    end
+    local rx, rw = x + lw + 12, w - lw - 12
+    rect(rx, y, rw, h, C.panel, 2, 8)
+    local cx = rx + 16
+    local sl = segmented(cx, y + 10, 270, 28, {"Wrap 1", "Wrap 2", "Wrap 3"}, slot)
+    if sl then state.cwSlot = sl end
+    text("Listed in Cosmetics > Wraps as Custom Wrap " .. slot .. "  -  pattern: " .. pattern, cx + 284, y + 17, C.dim, 12, 5)
+    text("Presets", cx, y + 54, C.dim, 13, 5)
+    for i, p in ipairs(CW.PRESETS) do
+        if button(cx + 74 + (i - 1) * 104, y + 48, 96, 28, p[1]) then
+            local col = values.Color1 or "ff00e6"
+            for k = 1, 3 do
+                setMapping(key, "Material" .. k, p[2][1])
+                setMapping(key, "Transparency" .. k, tostring(p[2][2]))
+                setMapping(key, "Color" .. k, col)
+            end
+            setMapping(key, "Pattern", p[3])
+        end
+    end
+    local part = state.cwPart or 1
+    text("Part", cx, y + 96, C.dim, 13, 5)
+    local pp = segmented(cx + 74, y + 90, 300, 28, CW.PARTS, part)
+    if pp then state.cwPart, part = pp, pp end
+    text("Material", cx, y + 136, C.dim, 13, 5)
+    local mat = tostring(values["Material" .. part] or ""):lower()
+    local mi = 0
+    for i, m in ipairs(CW.MATS) do if m:lower() == mat then mi = i end end
+    local mp = segmented(cx + 74, y + 130, rw - 106, 28, {"Neon", "Force", "Glass", "Metal", "Plastic"}, mi)
+    if mp then setMapping(key, "Material" .. part, CW.MATS[mp]) end
+    text("See-through", cx, y + 176, C.dim, 13, 5)
+    local tr, ti = tonumber(values["Transparency" .. part]) or 0, 1
+    for i, t in ipairs(CW.TRANS) do if math.abs(t - tr) < 0.01 then ti = i end end
+    local tp = segmented(cx + 94, y + 170, 280, 28, {"0%", "25%", "50%", "75%"}, ti)
+    if tp then setMapping(key, "Transparency" .. part, tostring(CW.TRANS[tp])) end
+    local now = tostring(values["Color" .. part] or ""):gsub("^#", ""):lower()
+    text("Colour", cx, y + 216, C.dim, 13, 5)
+    local size = 24
+    for i, c in ipairs(TRACER_COLORS) do
+        local bx = cx + 74 + (i - 1) * (size + 6)
+        if bx + size > rx + rw - 10 then break end
+        rect(bx, y + 210, size, size, hexColor(c[2]), 4, 5)
+        if now == c[2] then border(bx - 2, y + 208, size + 4, size + 4, C.text, 5, 6) end
+        if clicked(bx, y + 210, size, size) then setMapping(key, "Color" .. part, c[2]) end
+    end
+    textbox("cwHex", rx + 12, y + 246, rw - 150, 30, "Any colour, like ff66cc")
+    if button(rx + rw - 130, y + 246, 118, 30, "Use colour") then
+        local v = trim(state.inputs.cwHex or ""):gsub("^#", ""):lower()
+        if v:match("^%x%x%x%x%x%x$") then setMapping(key, "Color" .. part, v) else state.status = "Colours are 6 hex digits, like ff66cc" end
+    end
+    text("Most guns are mainly the Main part. Neon hides patterns. Shows on your next match, or when you re-enter an area.",
+        cx, y + h - 66, C.faint, 12, 5)
+    text("A wrap here wins over its line in Cosmetics. Only you see it.", cx, y + h - 46, C.faint, 12, 5)
+    if button(rx + rw - 150, y + h - 38, 138, 28, "Clear this wrap") then
+        for _, k in ipairs({"Replace", "Pattern", "Color1", "Color2", "Color3", "Material1", "Material2", "Material3", "Transparency1", "Transparency2", "Transparency3"}) do
+            setMapping(key, k, nil)
+        end
+    end
+end
+
 -- Misc: smaller features, each a tab of its own under this one.
 drawMisc = function(x, y, w, h)
     local at = state.miscTab or 1
-    local pick = segmented(x, y, math.min(w, 800), 30, {"Tracers", "Hands", "Spoof", "Profile card", "Health bar", "Buttons", "Theme"}, at)
+    local pick = segmented(x, y, math.min(w, 800), 30, {"Tracers", "Hands", "Spoof", "Profile card", "Health bar", "Buttons", "Theme", "Wraps"}, at)
     if pick and pick ~= at then state.miscTab, at, focus = pick, pick, nil end
     if at == 1 then drawTracers(x, y + 38, w, h - 38)
     elseif at == 2 then drawHands(x, y + 38, w, h - 38)
@@ -9691,7 +10000,8 @@ drawMisc = function(x, y, w, h)
     elseif at == 4 then drawSpoofCard(x, y + 38, w, h - 38)
     elseif at == 5 then drawHealthBar(x, y + 38, w, h - 38)
     elseif at == 6 then drawButtons(x, y + 38, w, h - 38)
-    else THEMES.draw(x, y + 38, w, h - 38) end
+    elseif at == 7 then THEMES.draw(x, y + 38, w, h - 38)
+    else THEMES.drawWraps(x, y + 38, w, h - 38) end
 end
 
 end -- Misc-page helper scope
@@ -9966,11 +10276,11 @@ local DRAW = {Skins = drawSkins, Cosmetics = drawCosmetics, Visuals = drawVisual
     Settings = drawSettings}
 DRAW.Updates = function(x,y,w,h)
     rect(x,y,w,h,C.panel,2,8)
-    text("Update log / 4.0.1 / October 22, 2026",x+20,y+20,C.text,18,5,true)
-    local entries={"Roblox layout, gradient and tracer compatibility fixes.",
+    text("Update log / 4.1 / October 31, 2026",x+20,y+20,C.text,18,5,true)
+    local entries={"Updated Roblox module, tracer and scope layouts; Jump Pad fix.",
         "Apply updates changed weapons/settings; Default restores their originals.",
         "Favorites, recent picks, filters and live-game catalog additions.",
-        "Config history, sharing, import, inventory export and logs.",
+        "Custom Wrap 1-3: materials, colors, transparency and patterns.",
         "Themes, lighting tuning and health bar shine/pulse/backing.",
         "Panic key, skins-only mode and FPS-friendly effects.",
         "Artwork quality: Low (150px) or HD (420px) in Settings > Extras."}
